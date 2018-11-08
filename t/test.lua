@@ -3,24 +3,24 @@ local G = ... -- this now points to the global environment in the script
 local env = {}
 G.setmetatable(env, {__index = G})
 
-local ide = G.ide
-local postinit = ide.app.postinit
-ide.app.postinit = function()
-  if postinit then postinit() end
+local pkg = package {
+  onIdleOnce = function() G.ide:GetOutput():GotoLine(G.ide:GetOutput():GetLineCount()-1) end,
+  onAppShutdown = function()
+    local ini = G.ide.config.ini
+    if ini then G.FileRemove(ini) end
+  end,
+}
 
-  -- load test module in the environment for tests
-  local function testwell(report)
-    local tw = require "testwell"
-    if report then tw.report() end
-  end
-  setfenv(testwell, env)
-  testwell()
-
+local function runtests()
   -- add a test function to detect loops
   function limit (limit, func)
     debug.sethook(function() error("exceeded") end, "", limit)
     local ok, res = pcall(func)
     debug.sethook()
+    if ok and ide:GetOutput():GetText():find("Auto-complete was aborted") then
+      ok, res = false, "Auto-complete was aborted"
+      ide:GetOutput():SetText('')
+    end
     return ok, res
   end
 
@@ -39,26 +39,39 @@ ide.app.postinit = function()
   end
 
   -- find all test files and load them
-  local files = FileSysGetRecursive("t", true, "*.lua")
-  for k, v in ipairs(files) do
-    if v:find("[/\\]test%.lua$") then files[k] = nil end
+  local files = ide:GetFileList("t", true, "*.lua")
+  for k = #files, 1, -1 do
+    if files[k]:find("[/\\]test%.lua$") then table.remove(files, k) end
   end
-  table.sort(files)
+
+  -- load test module in the environment for tests
+  local tw = require "testwell"
 
   for _,file in ipairs(files) do
     local testfn, err = loadfile(file)
     if not testfn then
-      print(("Error loading test file '%s': '%s'."):format(file, err))
+      ide:Print(("Error loading test file '%s': '%s'."):format(file, err))
+      break
     else
       setfenv(testfn, env)
-      local ok, err = pcall(testfn)
+      ide:Print("# "..file)
+      local ok, err = pcall(testfn, pkg)
       if not ok then
-        print(("Error executing test file '%s': '%s'."):format(file, err))
+        ide:Print(("Error executing test file '%s': '%s'."):format(file, err))
+        break
       end
     end
   end
 
-  testwell(true)
+  pkg.report = tw.report
 end
 
-G.setfenv(ide.app.postinit, env)
+pkg.onAppLoad = function()
+  local start = ide:GetTime()
+  G.setfenv(runtests, env)
+  G.print = function(s, ...)
+    G.DisplayOutput(s, ...)
+    G.DisplayOutputLn(s:match("ok %d") and (" -- %.3fs"):format(ide:GetTime()-start) or "")
+  end
+  runtests()
+end

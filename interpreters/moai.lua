@@ -1,6 +1,6 @@
 -- Copyright 2011-13 Paul Kulchenko, ZeroBrane LLC
 
-local moai
+local pathcache
 local win = ide.osname == "Windows"
 
 return {
@@ -8,7 +8,7 @@ return {
   description = "Moai mobile platform",
   api = {"baselib", "moai"},
   frun = function(self,wfilename,rundebug)
-    moai = moai or ide.config.path.moai -- check if the path is configured
+    local moai = ide.config.path.moai or pathcache -- check if the path is configured
     if not moai then
       local sep = win and ';' or ':'
       local default = win and GenerateProgramFilesPath('moai', sep)..sep or ''
@@ -22,10 +22,11 @@ return {
         table.insert(paths, p)
       end
       if not moai then
-        DisplayOutputLn("Can't find moai executable in any of the folders in PATH or MOAI_BIN: "
+        ide:Print("Can't find moai executable in any of the folders in PATH or MOAI_BIN: "
           ..table.concat(paths, ", "))
         return
       end
+      pathcache = moai
     end
 
     local file
@@ -37,7 +38,7 @@ return {
         if file then break end
       end
       if not file then
-        DisplayOutputLn("Can't find any of the specified entry points ("
+        ide:Print("Can't find any of the specified entry points ("
           ..table.concat(epoints, ", ")
           ..") in the current project; continuing with the current file...")
       end
@@ -45,7 +46,7 @@ return {
 
     if rundebug then
       -- start running the application right away
-      DebuggerAttachDefault({startwith = file,
+      ide:GetDebugger():SetOptions({startwith = file,
         runstart = ide.config.debugger.runonstart ~= false})
       local code = (
 [[xpcall(function() 
@@ -58,7 +59,7 @@ return {
       file = tmpfile:GetFullPath()
       local f = io.open(file, "w")
       if not f then
-        DisplayOutputLn("Can't open temporary file '"..file.."' for writing.")
+        ide:Print("Can't open temporary file '"..file.."' for writing.")
         return 
       end
       f:write(code)
@@ -87,6 +88,5 @@ return {
       function() if rundebug then wx.wxRemoveFile(file) end end)
   end,
   hasdebugger = true,
-  fattachdebug = function(self) DebuggerAttachDefault() end,
   scratchextloop = true,
 }

@@ -1,4 +1,4 @@
--- Copyright 2011-14 Paul Kulchenko, ZeroBrane LLC
+-- Copyright 2011-16 Paul Kulchenko, ZeroBrane LLC
 -- authors: Lomtik Software (J. Winwood & John Labenski)
 -- Luxinia Dev (Eike Decker & Christoph Kubisch)
 ---------------------------------------------------------
@@ -8,12 +8,13 @@ local frame = ide.frame
 local menuBar = frame.menuBar
 local uimgr = frame.uimgr
 
-local viewMenu = wx.wxMenu {
+local viewMenu = ide:MakeMenu {
   { ID_VIEWFILETREE, TR("Project/&FileTree Window")..KSC(ID_VIEWFILETREE), TR("View the project/filetree window"), wx.wxITEM_CHECK },
   { ID_VIEWOUTPUT, TR("&Output/Console Window")..KSC(ID_VIEWOUTPUT), TR("View the output/console window"), wx.wxITEM_CHECK },
   { ID_VIEWWATCHWINDOW, TR("&Watch Window")..KSC(ID_VIEWWATCHWINDOW), TR("View the watch window"), wx.wxITEM_CHECK },
   { ID_VIEWCALLSTACK, TR("&Stack Window")..KSC(ID_VIEWCALLSTACK), TR("View the stack window"), wx.wxITEM_CHECK },
   { ID_VIEWOUTLINE, TR("Outline Window")..KSC(ID_VIEWOUTLINE), TR("View the outline window"), wx.wxITEM_CHECK },
+  { ID_VIEWMARKERS, TR("Markers Window")..KSC(ID_VIEWMARKERS), TR("View the markers window"), wx.wxITEM_CHECK },
   { },
   { ID_VIEWTOOLBAR, TR("&Tool Bar")..KSC(ID_VIEWTOOLBAR), TR("Show/Hide the toolbar"), wx.wxITEM_CHECK },
   { ID_VIEWSTATUSBAR, TR("&Status Bar")..KSC(ID_VIEWSTATUSBAR), TR("Show/Hide the status bar"), wx.wxITEM_CHECK },
@@ -23,24 +24,24 @@ local viewMenu = wx.wxMenu {
 }
 
 do -- Add zoom submenu
-  local zoomMenu = wx.wxMenu{
+  local zoomMenu = ide:MakeMenu {
     {ID_ZOOMRESET, TR("Zoom to 100%")..KSC(ID_ZOOMRESET)},
     {ID_ZOOMIN, TR("Zoom In")..KSC(ID_ZOOMIN)},
     {ID_ZOOMOUT, TR("Zoom Out")..KSC(ID_ZOOMOUT)},
   }
 
   frame:Connect(ID_ZOOMRESET, wx.wxEVT_COMMAND_MENU_SELECTED,
-    function() local editor = GetEditorWithFocus()
+    function()local editor = ide:GetEditorWithFocus()
       if editor then editor:SetZoom(0) end end)
   frame:Connect(ID_ZOOMIN, wx.wxEVT_COMMAND_MENU_SELECTED,
-    function() local editor = GetEditorWithFocus()
+    function() local editor = ide:GetEditorWithFocus()
       if editor then editor:SetZoom(editor:GetZoom()+1) end end)
   frame:Connect(ID_ZOOMOUT, wx.wxEVT_COMMAND_MENU_SELECTED,
-    function() local editor = GetEditorWithFocus()
+    function() local editor = ide:GetEditorWithFocus()
       if editor then editor:SetZoom(editor:GetZoom()-1) end end)
 
   -- only enable if there is an editor
-  local iseditor = function (event) event:Enable(GetEditorWithFocus() ~= nil) end
+  local iseditor = function (event) event:Enable(ide:GetEditorWithFocus() ~= nil) end
   for _, id in ipairs({ID_ZOOMRESET, ID_ZOOMIN, ID_ZOOMOUT}) do
     frame:Connect(id, wx.wxEVT_UPDATE_UI, iseditor)
   end
@@ -56,6 +57,7 @@ local panels = {
   [ID_VIEWWATCHWINDOW] = "watchpanel",
   [ID_VIEWCALLSTACK] = "stackpanel",
   [ID_VIEWOUTLINE] = "outlinepanel",
+  [ID_VIEWMARKERS] = "markerspanel",
   [ID_VIEWTOOLBAR] = "toolbar",
 }
 
@@ -85,19 +87,20 @@ frame:Connect(ID_VIEWMINIMIZE, wx.wxEVT_COMMAND_MENU_SELECTED,
   function (event) ide.frame:Iconize(true) end)
 
 frame:Connect(ID_VIEWFULLSCREEN, wx.wxEVT_COMMAND_MENU_SELECTED, function ()
-    ShowFullScreen(not frame:IsFullScreen())
+    ide:ShowFullScreen(not frame:IsFullScreen())
   end)
 frame:Connect(ID_VIEWFULLSCREEN, wx.wxEVT_UPDATE_UI,
-  function (event) event:Enable(GetEditor() ~= nil) end)
+  function (event) event:Enable(ide:GetEditor() ~= nil) end)
 
 frame:Connect(ID_VIEWOUTPUT, wx.wxEVT_COMMAND_MENU_SELECTED, togglePanel)
 frame:Connect(ID_VIEWFILETREE, wx.wxEVT_COMMAND_MENU_SELECTED, togglePanel)
 frame:Connect(ID_VIEWTOOLBAR, wx.wxEVT_COMMAND_MENU_SELECTED, togglePanel)
 frame:Connect(ID_VIEWOUTLINE, wx.wxEVT_COMMAND_MENU_SELECTED, togglePanel)
+frame:Connect(ID_VIEWMARKERS, wx.wxEVT_COMMAND_MENU_SELECTED, togglePanel)
 frame:Connect(ID_VIEWWATCHWINDOW, wx.wxEVT_COMMAND_MENU_SELECTED,
-  function (event) if togglePanel(event) then DebuggerRefreshPanels() end end)
+  function (event) if togglePanel(event) then ide:GetDebugger():RefreshPanels() end end)
 frame:Connect(ID_VIEWCALLSTACK, wx.wxEVT_COMMAND_MENU_SELECTED,
-  function (event) if togglePanel(event) then DebuggerRefreshPanels() end end)
+  function (event) if togglePanel(event) then ide:GetDebugger():RefreshPanels() end end)
 
 frame:Connect(ID_VIEWSTATUSBAR, wx.wxEVT_COMMAND_MENU_SELECTED,
   function (event)

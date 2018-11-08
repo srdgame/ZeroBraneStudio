@@ -1,14 +1,4 @@
-local skipspecs = {
-  cg = true, glsl = true, luxres = true, opencl = true, sql = true,
-  cbase = true, hlsl = true, oglgpuprog = true, ptx = true, text = true,
-}
 return {
-  loadfilters = {
-    tools = function(file) return false end,
-    specs = function(file) return not skipspecs[file:match('spec[/\\]([^/\\]+)%.lua$') or ''] end,
-    interpreters = function(file) return not file:find('estrela') end,
-  },
-
   postinit = function ()
     local ide = ide
     local bundle = wx.wxIconBundle()
@@ -20,9 +10,6 @@ return {
     end
     if icons > 0 then ide.frame:SetIcons(bundle) end
 
-    local menuBar = ide.frame.menuBar
-    menuBar:Check(ID_CLEAROUTPUT, true)
-
     -- load myprograms/welcome.lua if exists and no projectdir
     local projectdir = ide.config.path.projectdir
     if (not projectdir or string.len(projectdir) == 0
@@ -33,7 +20,7 @@ return {
         -- normalize to absolute path
         if fn:Normalize(wx.wxPATH_NORM_ALL, dir) and fn:FileExists() then
           LoadFile(fn:GetFullPath(),nil,true)
-          ProjectUpdateProjectDir(fn:GetPath(wx.wxPATH_GET_VOLUME))
+          ide:SetProject(fn:GetPath(wx.wxPATH_GET_VOLUME))
           break
         end
       end

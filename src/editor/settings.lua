@@ -1,4 +1,4 @@
--- Copyright 2011-14 Paul Kulchenko, ZeroBrane LLC
+-- Copyright 2011-16 Paul Kulchenko, ZeroBrane LLC
 -- authors: Lomtik Software (J. Winwood & John Labenski)
 -- Luxinia Dev (Eike Decker & Christoph Kubisch)
 ---------------------------------------------------------
@@ -18,8 +18,25 @@ local layoutlabel = {
 -- ----------------------------------------------------------------------------
 -- Initialize the wxConfig for loading/saving the preferences
 
-local settings = wx.wxFileConfig(GetIDEString("settingsapp"),
-  GetIDEString("settingsvendor"), ide.config.ini or "")
+local ini = ide.config.ini
+-- if ini path is relative and includes a directory name, make it relative to the IDE location
+ini = ini and (not wx.wxIsAbsolutePath(ini) and wx.wxFileName(ini):GetDirCount() > 0
+  and MergeFullPath(GetPathWithSep(ide.editorFilename), ini) or ini)
+-- check that the ini file doesn't point to a directory
+if ini and (wx.wxFileName(ini):IsDir() or wx.wxIsAbsolutePath(ini) and wx.wxDirExists(ini)) then
+  ide:Print(("Can't use 'ini' configuration setting '%s' that points to a directory instead of a file; ignored.")
+    :format(ini))
+  ini = nil
+end
+-- check that the directory is writable
+if ini and wx.wxIsAbsolutePath(ini) and not wx.wxFileName(ini):IsDirWritable() then
+  ide:Print(("Can't use 'ini' configuration setting '%s' that points to a non-writable directory; ignored.")
+    :format(ini))
+  ini = nil
+end
+
+local settings = wx.wxFileConfig(
+  ide:GetProperty("settingsapp"), ide:GetProperty("settingsvendor"), ini or "")
 ide.settings = settings
 
 local function settingsReadSafe(settings,what,default)
@@ -34,27 +51,37 @@ function SettingsRestoreFramePosition(window, windowName)
   local path = settings:GetPath()
   settings:SetPath("/"..windowName)
 
-  local s = -1
-  s = tonumber(select(2,settings:Read("s", -1)))
+  local s = tonumber(select(2,settings:Read("s", -1)))
   local x = tonumber(select(2,settings:Read("x", 0)))
   local y = tonumber(select(2,settings:Read("y", 0)))
-  local w = tonumber(select(2,settings:Read("w", 1000)))
+  local w = tonumber(select(2,settings:Read("w", 1100)))
   local h = tonumber(select(2,settings:Read("h", 700)))
 
-  if (s ~= -1) and (s ~= 1) and (s ~= 2) then
-    local clientX, clientY, clientWidth, clientHeight
-    clientX, clientY, clientWidth, clientHeight = wx.wxClientDisplayRect()
+  if (s ~= -1) then
+    local clientX, clientY, clientWidth, clientHeight = wx.wxClientDisplayRect()
 
+    -- if left-top corner outside of the left-top side, reset it to the screen side
     if x < clientX then x = clientX end
     if y < clientY then y = clientY end
 
+    -- if the window is too wide for the screen, reset it to the screen size
     if w > clientWidth then w = clientWidth end
     if h > clientHeight then h = clientHeight end
 
+    -- if the right-bottom corner is still outside and there is only one display,
+    -- then reposition left-top corner, keeping the window centered
+    if wx.wxDisplay():GetCount() == 1 then
+      local outx = (x + w) - (clientX + clientWidth)
+      local outy = (y + h) - (clientY + clientHeight)
+      if outx > 0 then x = math.floor(0.5+(x - outx)/2) end
+      if outy > 0 then y = math.floor(0.5+(y - outy)/2) end
+    end
+
     window:SetSize(x, y, w, h)
-  elseif s == 1 then
-    window:Maximize(true)
   end
+
+  -- maximize after setting window position to make sure it's maximized on the correct monitor
+  if s == 1 then window:Maximize(true) end
 
   settings:SetPath(path)
 end
@@ -74,13 +101,10 @@ function SettingsSaveFramePosition(window, windowName)
   end
 
   settings:Write("s", s==2 and 0 or s) -- iconized maybe - but that shouldnt be saved
-
-  if s == 0 then
-    settings:Write("x", x)
-    settings:Write("y", y)
-    settings:Write("w", w)
-    settings:Write("h", h)
-  end
+  settings:Write("x", x)
+  settings:Write("y", y)
+  settings:Write("w", w)
+  settings:Write("h", h)
 
   settings:SetPath(path)
 end
@@ -244,7 +268,11 @@ function SettingsRestorePackage(package)
     if couldread then
       local ok, res = LoadSafe("return "..value)
       if ok then outtab[key] = res
-      else outtab[key] = nil end
+      else
+        outtab[key] = nil
+        ide:Print(("Couldn't load and ignored '%s' settings for package '%s': %s")
+          :format(key, package, res))
+      end
     end
     ismore, key, index = settings:GetNextEntry(index)
   end
@@ -252,16 +280,13 @@ function SettingsRestorePackage(package)
   return outtab
 end
 
-function SettingsSavePackage(package, values)
+function SettingsSavePackage(package, values, opts)
   local packagename = "/package/"..package
   local path = settings:GetPath()
-  local mdb = require('mobdebug')
 
   settings:DeleteGroup(packagename)
   settings:SetPath(packagename)
-  for k,v in pairs(values or {}) do
-    settings:Write(k, mdb.line(v, {comment = false, nocode = true}))
-  end
+  for k,v in pairs(values or {}) do settings:Write(k, DumpPlain(v, opts)) end
   settings:SetPath(path)
 end
 
@@ -396,39 +421,41 @@ function SettingsRestoreView()
   local path = settings:GetPath()
   settings:SetPath(listname)
 
-  local frame = ide.frame
-  local uimgr = frame.uimgr
+  local frame = ide:GetMainFrame()
+  local uimgr = ide:GetUIManager()
   
   local layoutcur = uimgr:SavePerspective()
-  local layout = settingsReadSafe(settings,layoutlabel.UIMANAGER,layoutcur)
+  local layout = settingsReadSafe(settings,layoutlabel.UIMANAGER,"")
   if (layout ~= layoutcur) then
     -- save the current toolbar besth and re-apply after perspective is loaded
-    -- bestw and besth has two separate issues:
+    -- bestw and besth have two separate issues:
     -- (1) layout includes bestw that is only as wide as the toolbar size,
     -- this leaves default background on the right side of the toolbar;
     -- fix it by explicitly replacing with the screen width.
     -- (2) besth may be wrong after icon size changes.
-    local toolbar = frame.uimgr:GetPane("toolbar")
+    local toolbar = uimgr:GetPane("toolbar")
     local besth = toolbar:IsOk() and tonumber(uimgr:SavePaneInfo(toolbar):match("besth=([^;]+)"))
-    uimgr:LoadPerspective(layout, false)
-    if toolbar:IsOk() then -- fix bestw and besth values
-      toolbar:BestSize(wx.wxSystemSettings.GetMetric(wx.wxSYS_SCREEN_X), besth or -1)
-    end
+
+    -- reload the perspective if the saved one is not empty as it's different from the default
+    if #layout > 0 then uimgr:LoadPerspective(layout, true) end
+
+    local screenw = frame:GetClientSize():GetWidth()
+    if toolbar:IsOk() then toolbar:BestSize(screenw, besth or -1) end
 
     -- check if debugging panes are not mentioned and float them
     for _, name in pairs({"stackpanel", "watchpanel"}) do
-      local pane = frame.uimgr:GetPane(name)
+      local pane = uimgr:GetPane(name)
       if pane:IsOk() and not layout:find(name) then pane:Float() end
     end
 
     -- check if the toolbar is not mentioned in the layout and show it
     for _, name in pairs({"toolbar"}) do
-      local pane = frame.uimgr:GetPane(name)
+      local pane = uimgr:GetPane(name)
       if pane:IsOk() and not layout:find(name) then pane:Show() end
     end
 
     -- remove captions from all panes
-    local panes = frame.uimgr:GetAllPanes()
+    local panes = uimgr:GetAllPanes()
     for index = 0, panes:GetCount()-1 do
       uimgr:GetPane(panes:Item(index).name):CaptionVisible(false)
     end
@@ -443,8 +470,7 @@ function SettingsRestoreView()
   if (layout ~= layoutcur) then
     loadNotebook(ide:GetOutputNotebook(),layout,
       -- treat "Output (running)" same as "Output"
-      function(name) return
-        name:match(TR("Output")) or name:match("Output") or name end)
+      function(name) return name:match(TR("Output")) or name:match("Output") or name end)
   end
 
   layoutcur = saveNotebook(ide:GetProjectNotebook())
@@ -462,11 +488,10 @@ function SettingsRestoreView()
   layout = settingsReadSafe(settings,layoutlabel.NOTEBOOK,layoutcur)
   if (layout ~= layoutcur) then
     loadNotebook(ide.frame.notebook,layout)
-    local openDocuments = ide.openDocuments
     local nb = frame.notebook
     local cnt = nb:GetPageCount()
     for i=0,cnt-1 do
-      openDocuments[nb:GetPage(i):GetId()].index = i
+      ide:GetDocument(nb:GetPage(i)):SetTabIndex(i)
     end
   end
 
@@ -488,7 +513,7 @@ function SettingsRestoreView()
     if newlayout ~= curlayout then m:LoadPerspective(newlayout) end
   end
 
-  local editor = GetEditor()
+  local editor = ide:GetEditor()
   if editor then editor:SetFocus() end
 
   settings:SetPath(path)
@@ -520,8 +545,9 @@ function SettingsRestoreEditorSettings()
   local path = settings:GetPath()
   settings:SetPath(listname)
 
-  ide.config.interpreter = settingsReadSafe(settings,"interpreter",ide.config.interpreter)
-  ProjectSetInterpreter(ide.config.interpreter)
+  local interpreter = settingsReadSafe(settings, "interpreter",
+    ide.config.interpreter or ide.config.default.interpreter)
+  ProjectSetInterpreter(interpreter)
 
   settings:SetPath(path)
 end
@@ -532,16 +558,16 @@ function SettingsSaveEditorSettings()
   settings:DeleteGroup(listname)
   settings:SetPath(listname)
 
-  settings:Write("interpreter", ide.interpreter and ide.interpreter.fname or "_undefined_")
+  settings:Write("interpreter", ide.interpreter and ide.interpreter.fname or ide.config.default.interpreter)
 
   settings:SetPath(path)
 end
 
 function SettingsSaveAll()
-  SettingsSaveProjectSession(FileTreeGetProjects())
   SettingsSaveFileSession(GetOpenFiles())
-  SettingsSaveView()
-  SettingsSaveFileHistory(GetFileHistory())
-  SettingsSaveFramePosition(ide.frame, "MainFrame")
   SettingsSaveEditorSettings()
+  SettingsSaveProjectSession(FileTreeGetProjects())
+  SettingsSaveFileHistory(GetFileHistory())
+  SettingsSaveView()
+  SettingsSaveFramePosition(ide.frame, "MainFrame")
 end

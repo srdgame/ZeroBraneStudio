@@ -10,8 +10,9 @@ editor.CallTipShow = function(editor, pos, tip) value = tip end
 EditorCallTip(editor, 10)
 editor.CallTipShow = CTS
 
-ok(value:find("print") and not value:find("select"),
-  "Tooltip ignores values in strings.")
+if ide.osname == 'Windows' then
+  ok(value:find("print") and not value:find("select"), "Tooltip ignores values in strings.")
+end
 
 local api = {
  t = {
@@ -34,15 +35,15 @@ Line4
 
 ide:AddAPI("lua", "test", api)
 table.insert(ide.interpreter.api, "test")
-ReloadLuaAPI()
+ReloadAPIs()
 local tooltip = GetTipInfo(editor, "t.func(")
 ok(tooltip:find("Line1\nLine2"), "Newlines are shown as newlines in tooltip")
 ok(tooltip:find("Line2\n\nLine4"), "Empty lines are shown as empty lines in tooltip")
 ok(tooltip:find("Line4\n\tLine5"), "Newlines with indentation are shown as lines with indentation in tooltip")
 ok(tooltip:find("Line5\n\t\n\tLine7"), "Empty lines with indentation are shown in tooltip")
 ide:RemoveAPI("lua", "test")
-ReloadLuaAPI()
+ReloadAPIs()
 
 -- cleanup
-ide:GetDocument(editor).isModified = false
+ide:GetDocument(editor):SetModified(false)
 ClosePage()

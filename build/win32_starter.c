@@ -8,6 +8,7 @@
 #define _WIN32_WINNT 0x0502
 #endif
 
+#define WIN32_LEAN_AND_MEAN
 #include <windows.h>
 #include <winbase.h>
 #include <stdlib.h>
@@ -52,9 +53,7 @@ static const char *luacode =
 "function(err) msg('Uncaught lua script exception',debug.traceback(err)) end)"
 ;
 
-#if defined(_WIN32) && defined (_MSC_VER)
-
-PCHAR*	CommandLineToArgvA(PCHAR CmdLine,int* _argc)
+PCHAR* CommandLineToArgv(PCHAR CmdLine,int* _argc)
 {
   PCHAR* argv;
   PCHAR  _argv;
@@ -70,8 +69,7 @@ PCHAR*	CommandLineToArgvA(PCHAR CmdLine,int* _argc)
   len = strlen(CmdLine);
   i = ((len+2)/2)*sizeof(PVOID) + sizeof(PVOID);
 
-  argv = (PCHAR*)GlobalAlloc(GMEM_FIXED,
-    i + (len+2)*sizeof(CHAR));
+  argv = (PCHAR*)GlobalAlloc(GMEM_FIXED, i + (len+2)*sizeof(CHAR));
 
   _argv = (PCHAR)(((PUCHAR)argv)+i);
 
@@ -134,39 +132,43 @@ PCHAR*	CommandLineToArgvA(PCHAR CmdLine,int* _argc)
   return argv;
 }
 
+PCHAR WideCharToUTF8(LPCWSTR text) {
+  int size_needed = WideCharToMultiByte(CP_UTF8, 0, text, -1, NULL, 0, NULL, NULL);
+  PCHAR buffer = (PCHAR)GlobalAlloc(GMEM_FIXED, size_needed);
+  WideCharToMultiByte(CP_UTF8, 0, text, -1, buffer, size_needed, NULL, NULL);
+  return buffer;
+}
+
 int WINAPI WinMain(HINSTANCE hInstance,  HINSTANCE hPrevInstance,  LPSTR lpCmdLine, int nCmdShow)
 {
   int argc;
-  char ** argv = CommandLineToArgvA(GetCommandLineA(),&argc);
-
-#else
-int main (int argc, char *argv[])
-{
-#endif
+  char ** argv = CommandLineToArgv(WideCharToUTF8(GetCommandLineW()),&argc);
   HINSTANCE hinstLib;
 
   char buffer[MAX_PATH],*file;
 
   if (!GetFullPathName(argv[0],MAX_PATH,buffer,&file)) {
     MessageBox(NULL,
-      TEXT("Couldn't find the correct working directory"),
+      TEXT("Couldn't find the executable path"),
       TEXT("Failed to start editor"),
       MB_OK|MB_ICONERROR);
     return 0;
   }
-  if (file!=NULL)
-    *file = 0; // finish the string, I don't need the appname
-  //int i;
-  //for (i=0;i<argc; i++)
-  //		printf("%d %s\n",i,argv[i]);
+  if (file!=NULL) *file = 0; // finish the string, don't need the appname
+
+  LPWSTR path = (LPWSTR)GlobalAlloc(GMEM_FIXED, MAX_PATH+1);
+  if (GetCurrentDirectoryW(MAX_PATH, path) == 0) {
+    MessageBox(NULL,
+      TEXT("Couldn't find the current working directory"),
+      TEXT("Failed to start editor"),
+      MB_OK|MB_ICONERROR);
+    return 0;
+  }
 
   SetCurrentDirectory(buffer);
 
-
-  SetDllDirectory(".\\bin\\");
-  hinstLib = LoadLibrary("lua51.dll");
-  if (hinstLib != NULL)
-  {
+  hinstLib = LoadLibrary(".\\bin\\lua51.dll");
+  if (hinstLib != NULL) {
     luaL_newstate = (voidfunc*) GetProcAddress(hinstLib, "luaL_newstate");
     luaL_loadbuffer = (varfunc*) GetProcAddress(hinstLib, "luaL_loadbuffer");
     luaL_openlibs = (varfunc*) GetProcAddress(hinstLib, "luaL_openlibs");
@@ -188,13 +190,19 @@ int main (int argc, char *argv[])
       // of the whole process, it SHOULD be pretty unlikely to fail here
       // but don't come back on me if it does...
       void *L = luaL_newstate();
-      int i;
 
       if (L!=NULL) {
-        lua_createtable(L,argc,0);
-        for (i=0;i<argc;i++) {
+        int i;
+        lua_createtable(L,argc+2,0);
+        lua_pushstring(L,argv[0]); // executable name goes first
+        lua_rawseti(L,-2,1);
+        lua_pushstring(L,"-cwd");
+        lua_rawseti(L,-2,2);
+        lua_pushstring(L,WideCharToUTF8(path));
+        lua_rawseti(L,-2,3);
+        for (i=1;i<argc;i++) {
           lua_pushstring(L,argv[i]);
-          lua_rawseti(L,-2,i+1);
+          lua_rawseti(L,-2,i+3);
         }
         lua_setfield(L,LUA_GLOBALSINDEX,"_ARG");
         luaL_openlibs(L);
@@ -204,18 +212,17 @@ int main (int argc, char *argv[])
           lua_pcall(L,0,0,0);
         else
           MessageBox(NULL,
-          TEXT("An unexpected error occured while loading the lua chunk."),
-          TEXT("Failed to start editor"),
-          MB_OK|MB_ICONERROR);
+            TEXT("An unexpected error occured while loading the lua chunk."),
+            TEXT("Failed to start editor"),
+            MB_OK|MB_ICONERROR);
       } else
         MessageBox(NULL,
-        TEXT("Couldn't initialize a luastate"),
-        TEXT("Failed to start editor"),
-        MB_OK|MB_ICONERROR);
+          TEXT("Couldn't initialize a luastate"),
+          TEXT("Failed to start editor"),
+          MB_OK|MB_ICONERROR);
     } else {
       MessageBox(NULL,
-        TEXT("Could not load all functions that are supposed to be located in the lua51.dll\n"
-        "This is not supposed to be happening..."),
+        TEXT("Could not load all functions that are supposed to be located in lua51.dll."),
         TEXT("Failed to start editor"),
         MB_OK|MB_ICONERROR);
     }
@@ -224,7 +231,7 @@ int main (int argc, char *argv[])
     FreeLibrary(hinstLib);
   } else {
     MessageBox(NULL,
-      TEXT("The lua51.dll could not be found or loaded, please check the working directory of the application.\n"),
+      TEXT("lua51.dll could not be found or loaded, please check the working directory of the application."),
       TEXT("Failed to initialize editor"),
       MB_OK|MB_ICONERROR);
   }

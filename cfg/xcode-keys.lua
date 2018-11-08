@@ -1,9 +1,9 @@
--- Copy the content of this file to user.lua;
+-- Add to your user / system configuration file: include "xcode-keys"
 -- see the [configuration](http://studio.zerobrane.com/doc-configuration.html) page for details.
 
 -- Alt-Shift-Cmd-X (Alt maps to Option, Ctrl maps to Command)
 -- The mapping is largely based on [Xcode Keyboard Shortcuts](http://developer.apple.com/library/mac/#documentation/IDEs/Conceptual/xcode_help-command_shortcuts/MenuCommands/MenuCommands014.html).
-local xcode = {
+local map = {
 -- File menu
   [ID.NEW]              = "Ctrl-N",
   [ID.OPEN]             = "Ctrl-O",
@@ -54,7 +54,7 @@ local xcode = {
   [ID.STEPOUT]          = "F8",
   [ID.TRACE]            = "",
   [ID.BREAK]            = "Ctrl-Y",
-  [ID.TOGGLEBREAKPOINT] = "Ctrl-\\",
+  [ID.BREAKPOINTTOGGLE] = "Ctrl-\\",
   [ID.CLEAROUTPUT]      = "",
   [ID.INTERPRETER]      = "",
   [ID.PROJECTDIR]       = "",
@@ -69,5 +69,4 @@ local xcode = {
   [ID.QUICKEVAL]        = "",
 }
 
-local G = ...
-for id, key in G.pairs(xcode) do keymap[id] = key end
+for id, key in pairs(map) do keymap[id] = key end

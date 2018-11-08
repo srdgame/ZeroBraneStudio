@@ -1,4 +1,4 @@
--- Copyright 2011-14 Paul Kulchenko, ZeroBrane LLC
+-- Copyright 2011-17 Paul Kulchenko, ZeroBrane LLC
 ---------------------------------------------------------
 
 local ide = ide
@@ -9,7 +9,7 @@ local frame = ide.frame
 local menuBar = frame.menuBar
 local mobdebug = require "mobdebug"
 
-local product = GetIDEString("help", "zerobranestudio")
+local product = ide:GetProperty("help", "zerobranestudio")
 local url = "http://zerobrane.com/r/"..product.."-"
 local urls = {
   [ID_HELPPROJECT] = "main",
@@ -20,8 +20,8 @@ local urls = {
   [ID_HELPCOMMUNITY] = "community",
 }
 
-local helpMenu = wx.wxMenu{
-  { ID_ABOUT, TR("&About")..KSC(ID_ABOUT), TR("About %s"):format(GetIDEString("editor")) },
+local helpMenu = ide:MakeMenu {
+  { ID_ABOUT, TR("&About")..KSC(ID_ABOUT), TR("About %s"):format(ide:GetProperty("editor")) },
   { ID_HELPPROJECT, TR("&Project Page")..KSC(ID_HELPPROJECT) },
   { ID_HELPDOCUMENTATION, TR("&Documentation")..KSC(ID_HELPDOCUMENTATION) },
   { ID_HELPGETTINGSTARTED, TR("&Getting Started Guide")..KSC(ID_HELPGETTINGSTARTED) },
@@ -32,8 +32,8 @@ local helpMenu = wx.wxMenu{
 -- do not translate Help menu on Mac as it won't merge with "standard" menus
 menuBar:Append(helpMenu, ide.osname == 'Macintosh' and "&Help" or TR("&Help"))
 
-local function DisplayAbout(event)
-  local logo = ide:GetAppName().."/"..GetIDEString("logo")
+local function displayAbout(event)
+  local logo = ide:GetAppName().."/"..ide:GetProperty("logo")
   local logoimg = wx.wxFileName(logo):FileExists() and
     ([[<tr><td><img src="%s"></td></tr>]]):format(logo) or ""
   local page = ([[
@@ -46,7 +46,7 @@ local function DisplayAbout(event)
 	  <tr>
 		<td>
 		<b>ZeroBrane Studio (%s; MobDebug %s)</b><br>
-		<b>Copyright &copy; 2011-2014 ZeroBrane LLC</b><br>
+		<b>Copyright &copy; 2011-2017 ZeroBrane LLC</b><br>
 		Paul Kulchenko<br>
 		Licensed under the MIT License.
 		</td>
@@ -62,7 +62,7 @@ local function DisplayAbout(event)
 	  </tr>
 	  <tr>
 		<td>
-		<b>Based on wxLua editor (%s)</b><br>
+		<b>Based on wxLua editor</b><br>
 		<b>Copyright &copy; 2002-2005 Lomtick Software</b><br>
 		J. Winwood, John Labenski<br>
 		Licensed under wxWindows Library License, v3.
@@ -70,7 +70,7 @@ local function DisplayAbout(event)
 	  </tr>
 	  <tr>
 		<td>
-                <b>Built with %s</b>
+                <b>Built with %s, %s</b>
 		</td>
 	  </tr>
 	</table>
@@ -78,9 +78,9 @@ local function DisplayAbout(event)
       </body>
     </html>]])
   :format(logoimg, ide.VERSION, mobdebug._VERSION, ide:GetAppName(),
-    wxlua.wxLUA_VERSION_STRING, wx.wxVERSION_STRING)
+    wx.wxVERSION_STRING, wxlua.wxLUA_VERSION_STRING)
 
-  local dlg = wx.wxDialog(frame, wx.wxID_ANY, TR("About %s"):format(GetIDEString("editor")))
+  local dlg = wx.wxDialog(frame, wx.wxID_ANY, TR("About %s"):format(ide:GetProperty("editor")))
 
   -- this is needed because wxLuaHtmlWindow only seems to take into account
   -- the initial size, but not the one set with SetSize using
@@ -111,7 +111,7 @@ local function DisplayAbout(event)
   dlg:Destroy()
 end
 
-frame:Connect(ID_ABOUT, wx.wxEVT_COMMAND_MENU_SELECTED, DisplayAbout)
+frame:Connect(ID_ABOUT, wx.wxEVT_COMMAND_MENU_SELECTED, displayAbout)
 for item, page in pairs(urls) do
   frame:Connect(item, wx.wxEVT_COMMAND_MENU_SELECTED,
     function() wx.wxLaunchDefaultBrowser(url..page, 0) end)

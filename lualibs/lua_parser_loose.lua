@@ -9,10 +9,6 @@ local PARSE = {}
 local unpack = table.unpack or unpack
 local LEX = require 'lua_lexer_loose'
 
-local function warn(message, position)
-  io.stderr:write('WARNING: ', tostring(position), ': ', message, '\n')
-end
-
 --[[
  Loose parser.
 
@@ -47,11 +43,7 @@ function PARSE.parse_scope(lx, f, level)
   end
   local function scope_end(opt, lineinfo)
     local scope = #scopes
-    if scope <= 1 then
-      warn("'end' without opening block", lineinfo)
-    else
-      table.remove(scopes)
-    end
+    if scope > 1 then table.remove(scopes) end
     local inside_local = false
     for scope = scope-1, 1, -1 do
       if scopes[scope].inside_local then inside_local = true; break end
@@ -90,10 +82,10 @@ function PARSE.parse_scope(lx, f, level)
     -- Detect end of previous statement
     if c.tag == 'Eof' -- trigger 'Statement' at the end of file
     or c.tag == 'Keyword' and (
-       c[1] == 'break' or c[1] == 'goto' or c[1] == 'do' or c[1] == 'while' or
+       c[1] == 'break' or c[1] == 'goto' or c[1] == 'do' or c[1] == 'while' or c[1] == 'else' or
        c[1] == 'repeat' or c[1] == 'if' or c[1] == 'for' or c[1] == 'function' and lx:peek().tag == 'Id' or
-       c[1] == 'local' or c[1] == ';' or c[1] == 'until' or c[1] == 'return' or c[1] == 'end') or
-       c.tag == 'Id' and
+       c[1] == 'local' or c[1] == ';' or c[1] == 'until' or c[1] == 'return' or c[1] == 'end')
+    or c.tag == 'Id' and
            (cprev.tag == 'Id' or
             cprev.tag == 'Keyword' and
                (cprev[1] == ']' or cprev[1] == ')' or cprev[1] == '}' or
@@ -169,7 +161,7 @@ function PARSE.parse_scope(lx, f, level)
       elseif c[1] == 'end' or c[1] == 'elseif' then
         scope_end(c[1], c.lineinfo)
       elseif c[1] == 'else' then
-        scope_end(nil, c.lineinfo)
+        scope_end(c[1], c.lineinfo)
         scope_begin(c[1], c.lineinfo)
       elseif c[1] == 'until' then
         scopes[#scopes].inside_until = true
@@ -181,21 +173,48 @@ function PARSE.parse_scope(lx, f, level)
         scopes[#scopes].inside_table = newval
       end
     elseif c.tag == 'Id' then
+      local scope = #scopes
+      local inside_local = scopes[scope].inside_local ~= nil
+      local inside_table = scopes[scope].inside_table
       local cnext = lx:peek()
       if cnext.tag == 'Keyword' and (cnext[1] == '(' or cnext[1] == '{')
       or cnext.tag == 'String' then
-        f('FunctionCall', c[1], c.lineinfo, scopes[#scopes].inside_local ~= nil)
+        f('FunctionCall', c[1], c.lineinfo, inside_local)
       end
-      local scope = #scopes
-      local inside_local = scopes[scope].inside_local ~= nil
-      if (scopes[scope].inside_table or cprev[1] == ',')
-      and cnext.tag == 'Keyword' and cnext[1] == '=' then
-        -- table field
-        f('String', c[1], c.lineinfo, inside_local)
+      -- either this is inside a table or it continues from a comma,
+      -- which may be a field assignment, so assume it's in a table
+      if (inside_table or cprev[1] == ',') and cnext.tag == 'Keyword' and cnext[1] == '=' then
+        -- table field; table fields are tricky to handle during incremental
+        -- processing as "a = 1" may be either an assignment (in which case
+        -- 'a' is Id) or a field initialization (in which case it's a String).
+        -- Since it's not possible to decide between two cases in isolation,
+        -- this is not a good place to insert a break; instead, the break is
+        -- inserted at the location of the previous keyword, which allows
+        -- to properly handle those cases. The desired location of
+        -- the restart point is returned as the `nobreak` value.
+        f('String', c[1], c.lineinfo,
+          inside_local or cprev and cprev.tag == 'Keyword' and cprev.lineinfo)
       elseif cprev.tag == 'Keyword' and (cprev[1] == ':' or cprev[1] == '.') then
         f('String', c[1], c.lineinfo, true)
       else
-        f('Id', c[1], c.lineinfo, inside_local)
+        f('Id', c[1], c.lineinfo, true)
+        -- this looks like the left side of (multi-variable) assignment
+        -- unless it's a part of `= var, field = value`, so skip if inside a table;
+        -- also take into account possible field assignment: `a.b, c = value`.
+        -- this still doesn't handle indexing with square brackets: `a[b], c = value`.
+        if not inside_table and not (cprev and cprev.tag == 'Keyword' and cprev[1] == '=') then
+          local cpeek = lx:peek()
+          while cpeek and cpeek.tag == 'Keyword' and (cpeek[1] == ',' or cpeek[1] == '.') do
+            local c = lx:next() -- skip the keyword
+            if cpeek[1] == ',' and lx:peek().tag ~= 'Id' then break end
+
+            c = lx:next()
+            f(cpeek[1] == ',' and 'Id' or 'String', c[1], c.lineinfo, true)
+
+            cpeek = lx:peek()
+          end
+          if not cpeek then break end
+        end
       end
     end
     
@@ -249,11 +268,7 @@ function PARSE.parse_scope_resolve(lx, f, vars)
       vars = newscope(vars, name, lineinfo)
     elseif op == 'EndScope' then
       local mt = getmetatable(vars)
-      if mt == nil then
-        warn("'end' without opening block.", lineinfo)
-      else
-        vars = mt.__index
-      end
+      if mt ~= nil then vars = mt.__index end
     elseif op == 'Id'
     or op == 'String' or op == 'FunctionCall' or op == 'Function' then
       -- Just make callback

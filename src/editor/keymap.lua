@@ -1,9 +1,11 @@
+-- Copyright 2011-18 Paul Kulchenko, ZeroBrane LLC
+
 local ide = ide
 
 --[[
-Accelerator general syntax is any combination of "CTRL", "ALT" and "SHIFT"
-strings (case doesn't matter) separated by either '-' or '+' characters and
-followed by the accelerator itself. The accelerator may be any alphanumeric
+Accelerator general syntax is any combination of "CTRL", "ALT", "RAWCTRL" and
+"SHIFT" strings (case doesn't matter) separated by either '-' or '+' characters
+and followed by the accelerator itself. The accelerator may be any alphanumeric
 character, any function key (from F1 to F12) or one of the special characters
 listed below (again, case doesn't matter):
 
@@ -21,92 +23,108 @@ listed below (again, case doesn't matter):
   SPACE        Space
   TAB          Tab key
   ESC/ESCAPE   Escape key (Windows only)
+
+"CTRL" accelerator is mapped to "Cmd" key on OSX and to "Ctrl" key on other platforms.
+"RAWCTRL" accelerator is mapped to "Ctrl" key on all platforms. For example, to specify
+a combination of "Ctrl" with "PGUP" use "RawCtrl-PgUp".
 --]]
 
 ide.config.keymap = {
 -- File menu
-  [ID_NEW]              = "Ctrl-N",
-  [ID_OPEN]             = "Ctrl-O",
-  [ID_CLOSE]            = "Ctrl-W",
-  [ID_SAVE]             = "Ctrl-S",
-  [ID_SAVEAS]           = "Alt-Shift-S",
-  [ID_SAVEALL]          = "",
-  [ID_RECENTFILES]      = "",
-  [ID_RECENTFILESPREV]  = "Ctrl-,",
-  [ID_RECENTFILESNEXT]  = "Ctrl-.",
-  [ID_EXIT]             = "Ctrl-Q",
-  [ID_RECENTPROJECTSPREV] = "Ctrl-Shift-<",
+  [ID.NEW]              = "Ctrl-N",
+  [ID.OPEN]             = "Ctrl-O",
+  [ID.CLOSE]            = "Ctrl-W",
+  [ID.SAVE]             = "Ctrl-S",
+  [ID.SAVEAS]           = "Alt-Shift-S",
+  [ID.SAVEALL]          = "",
+  [ID.RECENTFILES]      = "",
+  [ID.RECENTFILESPREV]  = "Ctrl-,",
+  [ID.RECENTFILESNEXT]  = "Ctrl-.",
+  [ID.EXIT]             = "Ctrl-Q",
+  [ID.RECENTPROJECTSPREV] = "Ctrl-Shift-<",
 -- Edit menu
-  [ID_CUT]              = "Ctrl-X",
-  [ID_COPY]             = "Ctrl-C",
-  [ID_PASTE]            = "Ctrl-V",
-  [ID_SELECTALL]        = "Ctrl-A",
-  [ID_UNDO]             = "Ctrl-Z",
-  [ID_REDO]             = "Ctrl-Y",
-  [ID_SHOWTOOLTIP]      = "Ctrl-T",
-  [ID_AUTOCOMPLETE]     = "Ctrl-K",
-  [ID_AUTOCOMPLETEENABLE] = "",
-  [ID_COMMENT]          = "Ctrl-U",
-  [ID_FOLD]             = "F12",
-  [ID_CLEARDYNAMICWORDS] = "",
-  [ID_REINDENT]         = "Ctrl-I",
-  [ID_BOOKMARKTOGGLE]   = "Ctrl-F2",
-  [ID_BOOKMARKNEXT]     = "F2",
-  [ID_BOOKMARKPREV]     = "Shift-F2",
-  [ID_NAVIGATETOFILE]   = "Ctrl-P",
-  [ID_NAVIGATETOLINE]   = "Ctrl-G",
-  [ID_NAVIGATETOSYMBOL] = "Ctrl-B",
-  [ID_NAVIGATETOMETHOD] = "Ctrl-;",
+  [ID.CUT]              = "Ctrl-X",
+  [ID.COPY]             = "Ctrl-C",
+  [ID.PASTE]            = "Ctrl-V",
+  [ID.SELECTALL]        = "Ctrl-A",
+  [ID.UNDO]             = "Ctrl-Z",
+  [ID.REDO]             = "Ctrl-Y",
+  [ID.SHOWTOOLTIP]      = "Ctrl-T",
+  [ID.AUTOCOMPLETE]     = "Ctrl-K",
+  [ID.AUTOCOMPLETEENABLE] = "",
+  [ID.COMMENT]          = "Ctrl-U",
+  [ID.FOLD]             = "F12",
+  [ID.FOLDLINE]         = "Shift-F12",
+  [ID.CLEARDYNAMICWORDS] = "",
+  [ID.REINDENT]         = "Ctrl-I",
+  [ID.BOOKMARKTOGGLE]   = "Ctrl-F2",
+  [ID.BOOKMARKNEXT]     = "F2",
+  [ID.BOOKMARKPREV]     = "Shift-F2",
+  [ID.NAVIGATETOFILE]   = "Ctrl-P",
+  [ID.NAVIGATETOLINE]   = "Ctrl-G",
+  [ID.NAVIGATETOSYMBOL] = "Ctrl-B",
+  [ID.NAVIGATETOMETHOD] = "Ctrl-;",
 -- Search menu
-  [ID_FIND]             = "Ctrl-F",
-  [ID_FINDNEXT]         = "F3",
-  [ID_FINDPREV]         = "Shift-F3",
-  [ID_FINDSELECTNEXT]   = "Ctrl-F3",
-  [ID_FINDSELECTPREV]   = "Ctrl-Shift-F3",
-  [ID_REPLACE]          = "Ctrl-R",
-  [ID_FINDINFILES]      = "Ctrl-Shift-F",
-  [ID_REPLACEINFILES]   = "Ctrl-Shift-R",
-  [ID_SORT]             = "",
+  [ID.FIND]             = "Ctrl-F",
+  [ID.FINDNEXT]         = "F3",
+  [ID.FINDPREV]         = "Shift-F3",
+  [ID.FINDSELECTNEXT]   = "Ctrl-F3",
+  [ID.FINDSELECTPREV]   = "Ctrl-Shift-F3",
+  [ID.REPLACE]          = "Ctrl-R",
+  [ID.FINDINFILES]      = "Ctrl-Shift-F",
+  [ID.REPLACEINFILES]   = "Ctrl-Shift-R",
+  [ID.SORT]             = "",
 -- View menu
-  [ID_VIEWFILETREE]     = "Ctrl-Shift-P",
-  [ID_VIEWOUTPUT]       = "Ctrl-Shift-O",
-  [ID_VIEWWATCHWINDOW]  = "Ctrl-Shift-W",
-  [ID_VIEWCALLSTACK]    = "Ctrl-Shift-S",
-  [ID_VIEWDEFAULTLAYOUT] = "",
-  [ID_VIEWFULLSCREEN]   = "Ctrl-Shift-A",
-  [ID_ZOOMRESET]        = "Ctrl-0",
-  [ID_ZOOMIN]           = "Ctrl-+",
-  [ID_ZOOMOUT]          = "Ctrl--",
+  [ID.VIEWFILETREE]     = "Ctrl-Shift-P",
+  [ID.VIEWOUTPUT]       = "Ctrl-Shift-O",
+  [ID.VIEWWATCHWINDOW]  = "Ctrl-Shift-W",
+  [ID.VIEWCALLSTACK]    = "Ctrl-Shift-S",
+  [ID.VIEWDEFAULTLAYOUT] = "",
+  [ID.VIEWFULLSCREEN]   = "Ctrl-Shift-A",
+  [ID.ZOOMRESET]        = "Ctrl-0",
+  [ID.ZOOMIN]           = "Ctrl-+",
+  [ID.ZOOMOUT]          = "Ctrl--",
 -- Project menu
-  [ID_RUN]              = "F6",
-  [ID_RUNNOW]           = "Ctrl-F6",
-  [ID_COMPILE]          = "F7",
-  [ID_ANALYZE]          = "Shift-F7",
-  [ID_STARTDEBUG]       = "F5",
-  [ID_ATTACHDEBUG]      = "",
-  [ID_STOPDEBUG]        = "Shift-F5",
-  [ID_STEP]             = "F10",
-  [ID_STEPOVER]         = "Shift-F10",
-  [ID_STEPOUT]          = "Ctrl-F10",
-  [ID_RUNTO]            = "Ctrl-Shift-F10",
-  [ID_TRACE]            = "",
-  [ID_BREAK]            = "Shift-F9",
-  [ID_TOGGLEBREAKPOINT] = "F9",
-  [ID_CLEAROUTPUT]      = "",
-  [ID_INTERPRETER]      = "",
-  [ID_PROJECTDIR]       = "",
+  [ID.RUN]              = "F6",
+  [ID.RUNNOW]           = "Ctrl-F6",
+  [ID.COMPILE]          = "F7",
+  [ID.ANALYZE]          = "Shift-F7",
+  [ID.STARTDEBUG]       = "F5",
+  [ID.ATTACHDEBUG]      = "",
+  [ID.DETACHDEBUG]      = "",
+  [ID.STOPDEBUG]        = "Shift-F5",
+  [ID.STEP]             = "F10",
+  [ID.STEPOVER]         = "Shift-F10",
+  [ID.STEPOUT]          = "Ctrl-F10",
+  [ID.RUNTO]            = "Ctrl-Shift-F10",
+  [ID.TRACE]            = "",
+  [ID.BREAK]            = "",
+  [ID.BREAKPOINTTOGGLE] = "Ctrl-F9",
+  [ID.BREAKPOINTNEXT]   = "F9",
+  [ID.BREAKPOINTPREV]   = "Shift-F9",
+  [ID.CLEAROUTPUT]      = "",
+  [ID.CLEAROUTPUTENABLE] = "",
+  [ID.INTERPRETER]      = "",
+  [ID.PROJECTDIR]       = "",
 -- Help menu
-  [ID_ABOUT]            = "F1",
+  [ID.ABOUT]            = "F1",
 -- Watch window menu items
-  [ID_ADDWATCH]         = "Ins",
-  [ID_EDITWATCH]        = "F2",
-  [ID_DELETEWATCH]      = "Del",
+  [ID.ADDWATCH]         = "Ins",
+  [ID.EDITWATCH]        = "F2",
+  [ID.DELETEWATCH]      = "Del",
 -- Editor popup menu items
-  [ID_QUICKADDWATCH]    = "",
-  [ID_QUICKEVAL]        = "",
+  [ID.GOTODEFINITION]   = "",
+  [ID.RENAMEALLINSTANCES] = "",
+  [ID.REPLACEALLSELECTIONS] = "",
+  [ID.QUICKADDWATCH]    = "",
+  [ID.QUICKEVAL]        = "",
+  [ID.ADDTOSCRATCHPAD]  = "",
 -- Filetree popup menu items
-  [ID_RENAMEFILE]       = "F2",
-  [ID_DELETEFILE]       = "Del",
+  [ID.RENAMEFILE]       = "F2",
+  [ID.DELETEFILE]       = "Del",
+-- Special global accelerators
+  [ID.NOTEBOOKTABNEXT]  = "RawCtrl-PgDn",
+  [ID.NOTEBOOKTABPREV]  = "RawCtrl-PgUp",
 }
 
 function KSC(id, default)
@@ -119,15 +137,15 @@ end
 ide.config.editor.keymap = {
   -- key, modifier, command, os: http://www.scintilla.org/ScintillaDoc.html#KeyboardCommands
   -- Cmd+Left/Right moves to start/end of line
-  {wxstc.wxSTC_KEY_LEFT, wxstc.wxSTC_SCMOD_CTRL, wxstc.wxSTC_CMD_HOME, "Macintosh"},
-  {wxstc.wxSTC_KEY_RIGHT, wxstc.wxSTC_SCMOD_CTRL, wxstc.wxSTC_CMD_LINEEND, "Macintosh"},
+  ["Ctrl-Left"] = {wxstc.wxSTC_KEY_LEFT, wxstc.wxSTC_SCMOD_CTRL, wxstc.wxSTC_CMD_HOME, "Macintosh"},
+  ["Ctrl-Right"] = {wxstc.wxSTC_KEY_RIGHT, wxstc.wxSTC_SCMOD_CTRL, wxstc.wxSTC_CMD_LINEEND, "Macintosh"},
   -- Cmd+Shift+Left/Right selects to the beginning/end of the line
-  {wxstc.wxSTC_KEY_LEFT, wxstc.wxSTC_SCMOD_CTRL+wxstc.wxSTC_SCMOD_SHIFT, wxstc.wxSTC_CMD_HOMEEXTEND, "Macintosh"},
-  {wxstc.wxSTC_KEY_RIGHT, wxstc.wxSTC_SCMOD_CTRL+wxstc.wxSTC_SCMOD_SHIFT, wxstc.wxSTC_CMD_LINEENDEXTEND, "Macintosh"},
+  ["Ctrl-Shift-Left"] = {wxstc.wxSTC_KEY_LEFT, wxstc.wxSTC_SCMOD_CTRL+wxstc.wxSTC_SCMOD_SHIFT, wxstc.wxSTC_CMD_HOMEEXTEND, "Macintosh"},
+  ["Ctrl-Shift-Right"] = {wxstc.wxSTC_KEY_RIGHT, wxstc.wxSTC_SCMOD_CTRL+wxstc.wxSTC_SCMOD_SHIFT, wxstc.wxSTC_CMD_LINEENDEXTEND, "Macintosh"},
   -- Cmd+Shift+Up/Down selects to the beginning/end of the text
-  {wxstc.wxSTC_KEY_UP, wxstc.wxSTC_SCMOD_CTRL+wxstc.wxSTC_SCMOD_SHIFT, wxstc.wxSTC_CMD_LINEUPEXTEND, "Macintosh"},
-  {wxstc.wxSTC_KEY_DOWN, wxstc.wxSTC_SCMOD_CTRL+wxstc.wxSTC_SCMOD_SHIFT, wxstc.wxSTC_CMD_LINEDOWNEXTEND, "Macintosh"},
+  ["Ctrl-Shift-Up"] = {wxstc.wxSTC_KEY_UP, wxstc.wxSTC_SCMOD_CTRL+wxstc.wxSTC_SCMOD_SHIFT, wxstc.wxSTC_CMD_LINEUPEXTEND, "Macintosh"},
+  ["Ctrl-Shift-Down"] = {wxstc.wxSTC_KEY_DOWN, wxstc.wxSTC_SCMOD_CTRL+wxstc.wxSTC_SCMOD_SHIFT, wxstc.wxSTC_CMD_LINEDOWNEXTEND, "Macintosh"},
   -- Opt+Left/Right moves one word left (to the beginning)/right (to the end)
-  {wxstc.wxSTC_KEY_LEFT, wxstc.wxSTC_SCMOD_ALT, wxstc.wxSTC_CMD_WORDLEFT, "Macintosh"},
-  {wxstc.wxSTC_KEY_RIGHT, wxstc.wxSTC_SCMOD_ALT, wxstc.wxSTC_CMD_WORDRIGHTEND, "Macintosh"},
+  ["Alt-Left"] = {wxstc.wxSTC_KEY_LEFT, wxstc.wxSTC_SCMOD_ALT, wxstc.wxSTC_CMD_WORDLEFT, "Macintosh"},
+  ["Alt-Right"] = {wxstc.wxSTC_KEY_RIGHT, wxstc.wxSTC_SCMOD_ALT, wxstc.wxSTC_CMD_WORDRIGHTEND, "Macintosh"},
 }

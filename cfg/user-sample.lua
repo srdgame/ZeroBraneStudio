@@ -10,8 +10,8 @@ See [configuration](http://studio.zerobrane.com/doc-configuration.html) page for
 --]]--
 
 -- to modify loaded configuration for recognized extensions for lua files
-local G = ... -- this now points to the global environment in the script
-local luaspec = G.ide.specs['lua']
+-- (no longer needed in v1.21+) local G = ... -- this now points to the global environment
+local luaspec = ide.specs.lua
 luaspec.exts[#luaspec.exts+1] = "luaz"
 luaspec.keywords[1] = luaspec.keywords[1] .. ' foo'
 
@@ -82,10 +82,10 @@ styles.text = {bg = {240,240,220}}
 
 -- to change the default color scheme; check tomorrow.lua for the list
 -- of supported schemes or use cfg/scheme-picker.lua to pick a scheme.
-local G = ...
-styles = G.loadfile('cfg/tomorrow.lua')('Tomorrow')
--- also apply the same scheme to Output and Console windows
-stylesoutshell = styles
+styles = loadfile('cfg/tomorrow.lua')('Tomorrow')
+stylesoutshell = styles -- apply the same scheme to Output/Console windows
+styles.auxwindow = styles.text -- apply text colors to auxiliary windows
+styles.calltip = styles.text -- apply text colors to tooltips
 
 -- to change markers used in console and output windows
 styles.marker = styles.marker or {}
@@ -95,7 +95,7 @@ styles.marker.prompt = {ch = wxstc.wxSTC_MARK_CHARACTER+('>'):byte(), fg = {0, 0
 stylesoutshell = styles
 
 -- to disable indicators (underlining) on function calls
-styles.indicator.fncall = nil
+-- styles.indicator.fncall = nil
 
 -- to change the color of the indicator used for function calls
 styles.indicator.fncall.fg = {240,0,0}
@@ -113,7 +113,7 @@ styles.indicator.fncall.st = wxstc.wxSTC_INDIC_PLAIN
   --]]
 
 -- to enable additional spec files (like spec/glsl.lua)
-load.specs(function(file) return file:find('spec[/\\]glsl%.lua$') end)
+-- (no longer needed in v1.51+) load.specs(function(file) return file:find('spec[/\\]glsl%.lua$') end)
 
 -- to specify a default EOL encoding to be used for new files:
 -- `wxstc.wxSTC_EOL_CRLF` or `wxstc.wxSTC_EOL_LF`;
@@ -142,8 +142,8 @@ editor.nomousezoom = true
 corona = { skin = "iPad" }
 
 -- to style individual keywords; `return` and `break` are shown in red
-local G = ... -- this now points to the global environment in the script
-local luaspec = G.ide.specs.lua
+-- (no longer needed in v1.21+) local G = ... -- this now points to the global environment
+local luaspec = ide.specs.lua
 
 local num = #luaspec.keywords
 -- take a new slot in the list of keywords (starting from 1)
@@ -162,3 +162,9 @@ editor.keymap[#editor.keymap+1] = {wxstc.wxSTC_KEY_RIGHT, wxstc.wxSTC_SCMOD_ALT+
 editor.keymap[#editor.keymap+1] = {('A'):byte(), wxstc.wxSTC_SCMOD_CTRL, wxstc.wxSTC_CMD_HOME}
 editor.keymap[#editor.keymap+1] = {('E'):byte(), wxstc.wxSTC_SCMOD_CTRL, wxstc.wxSTC_CMD_LINEEND}
 keymap[ID.SELECTALL] = nil -- remove `Ctrl-A` shortcut from `SelectAll`
+
+-- updated shortcuts to use them as of v1.20
+keymap[ID.BREAK]            = "Shift-F9"
+keymap[ID.BREAKPOINTTOGGLE] = "F9"
+keymap[ID.BREAKPOINTNEXT]   = ""
+keymap[ID.BREAKPOINTPREV]   = ""

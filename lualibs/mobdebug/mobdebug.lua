@@ -1,6 +1,6 @@
 --
 -- MobDebug -- Lua remote debugger
--- Copyright 2011-15 Paul Kulchenko
+-- Copyright 2011-18 Paul Kulchenko
 -- Based on RemDebug 1.0 Copyright Kepler Project 2005
 --
 
@@ -19,7 +19,7 @@ end)("os")
 
 local mobdebug = {
   _NAME = "mobdebug",
-  _VERSION = 0.613,
+  _VERSION = "0.705",
   _COPYRIGHT = "Paul Kulchenko",
   _DESCRIPTION = "Mobile Remote Debugger for the Lua programming language",
   port = os and os.getenv and tonumber((os.getenv("MOBDEBUG_PORT"))) or 8172,
@@ -28,6 +28,7 @@ local mobdebug = {
   connecttimeout = 2, -- connect timeout (s)
 }
 
+local HOOKMASK = "lcr"
 local error = error
 local getfenv = getfenv
 local setfenv = setfenv
@@ -37,6 +38,7 @@ local setmetatable = setmetatable
 local tonumber = tonumber
 local unpack = table.unpack or unpack
 local rawget = rawget
+local gsub, sub, find = string.gsub, string.sub, string.find
 
 -- if strict.lua is used, then need to avoid referencing some global
 -- variables, as they can be undefined;
@@ -61,6 +63,7 @@ local corocreate = ngx and coroutine._create or coroutine.create
 local cororesume = ngx and coroutine._resume or coroutine.resume
 local coroyield = ngx and coroutine._yield or coroutine.yield
 local corostatus = ngx and coroutine._status or coroutine.status
+local corowrap = coroutine.wrap
 
 if not setfenv then -- Lua 5.2+
   -- based on http://lua-users.org/lists/lua-l/2010-06/msg00314.html
@@ -124,34 +127,38 @@ local debugee = function ()
   for _ = 1, 10 do a = a + 1 end
   error(deferror)
 end
-local function q(s) return s:gsub('([%(%)%.%%%+%-%*%?%[%^%$%]])','%%%1') end
+local function q(s) return string.gsub(s, '([%(%)%.%%%+%-%*%?%[%^%$%]])','%%%1') end
 
 local serpent = (function() ---- include Serpent module for serialization
-local n, v = "serpent", 0.28 -- (C) 2012-15 Paul Kulchenko; MIT License
+local n, v = "serpent", "0.302" -- (C) 2012-18 Paul Kulchenko; MIT License
 local c, d = "Paul Kulchenko", "Lua serializer and pretty printer"
 local snum = {[tostring(1/0)]='1/0 --[[math.huge]]',[tostring(-1/0)]='-1/0 --[[-math.huge]]',[tostring(0/0)]='0/0'}
 local badtype = {thread = true, userdata = true, cdata = true}
+local getmetatable = debug and debug.getmetatable or getmetatable
+local pairs = function(t) return next, t end -- avoid using __pairs in Lua 5.2+
 local keyword, globals, G = {}, {}, (_G or _ENV)
 for _,k in ipairs({'and', 'break', 'do', 'else', 'elseif', 'end', 'false',
   'for', 'function', 'goto', 'if', 'in', 'local', 'nil', 'not', 'or', 'repeat',
   'return', 'then', 'true', 'until', 'while'}) do keyword[k] = true end
 for k,v in pairs(G) do globals[v] = k end -- build func to name mapping
 for _,g in ipairs({'coroutine', 'debug', 'io', 'math', 'string', 'table', 'os'}) do
-  for k,v in pairs(G[g] or {}) do globals[v] = g..'.'..k end end
+  for k,v in pairs(type(G[g]) == 'table' and G[g] or {}) do globals[v] = g..'.'..k end end
 
 local function s(t, opts)
   local name, indent, fatal, maxnum = opts.name, opts.indent, opts.fatal, opts.maxnum
   local sparse, custom, huge = opts.sparse, opts.custom, not opts.nohuge
   local space, maxl = (opts.compact and '' or ' '), (opts.maxlevel or math.huge)
+  local maxlen, metatostring = tonumber(opts.maxlength), opts.metatostring
   local iname, comm = '_'..(name or ''), opts.comment and (tonumber(opts.comment) or math.huge)
+  local numformat = opts.numformat or "%.17g"
   local seen, sref, syms, symn = {}, {'local '..iname..'={}'}, {}, 0
   local function gensym(val) return '_'..(tostring(tostring(val)):gsub("[^%w]",""):gsub("(%d%w+)",
     -- tostring(val) is needed because __tostring may return a non-string value
     function(s) if not syms[s] then symn = symn+1; syms[s] = symn end return tostring(syms[s]) end)) end
-  local function safestr(s) return type(s) == "number" and tostring(huge and snum[tostring(s)] or s)
+  local function safestr(s) return type(s) == "number" and tostring(huge and snum[tostring(s)] or numformat:format(s))
     or type(s) ~= "string" and tostring(s) -- escape NEWLINE/010 and EOF/026
     or ("%q"):format(s):gsub("\010","n"):gsub("\026","\\026") end
-  local function comment(s,l) return comm and (l or 0) < comm and ' --[['..tostring(s)..']]' or '' end
+  local function comment(s,l) return comm and (l or 0) < comm and ' --[['..select(2, pcall(tostring, s))..']]' or '' end
   local function globerr(s,l) return globals[s] and globals[s]..comment(s,l) or not fatal
     and safestr(select(2, pcall(tostring, s))) or error("Can't serialize "..tostring(s)) end
   local function safename(path, name) -- generates foo.bar, foo[3], or foo['b a r']
@@ -175,14 +182,21 @@ local function s(t, opts)
     if seen[t] then -- already seen this element
       sref[#sref+1] = spath..space..'='..space..seen[t]
       return tag..'nil'..comment('ref', level) end
-    if type(mt) == 'table' and (mt.__serialize or mt.__tostring) then -- knows how to serialize itself
-      seen[t] = insref or spath
-      if mt.__serialize then t = mt.__serialize(t) else t = tostring(t) end
-      ttype = type(t) end -- new value falls through to be serialized
+    -- protect from those cases where __tostring may fail
+    if type(mt) == 'table' and metatostring ~= false then
+      local to, tr = pcall(function() return mt.__tostring(t) end)
+      local so, sr = pcall(function() return mt.__serialize(t) end)
+      if (to or so) then -- knows how to serialize itself
+        seen[t] = insref or spath
+        t = so and sr or tr
+        ttype = type(t)
+      end -- new value falls through to be serialized
+    end
     if ttype == "table" then
-      if level >= maxl then return tag..'{}'..comment('max', level) end
+      if level >= maxl then return tag..'{}'..comment('maxlvl', level) end
       seen[t] = insref or spath
       if next(t) == nil then return tag..'{}'..comment(t, level) end -- table empty
+      if maxlen and maxlen < 0 then return tag..'{}'..comment('maxlen', level) end
       local maxn, o, out = math.min(#t, maxnum or #t), {}, {}
       for key = 1, maxn do o[key] = key end
       if not maxnum or #o < maxnum then
@@ -195,6 +209,7 @@ local function s(t, opts)
         local value, ktype, plainindex = t[key], type(key), n <= maxn and not sparse
         if opts.valignore and opts.valignore[value] -- skip ignored values; do nothing
         or opts.keyallow and not opts.keyallow[key]
+        or opts.keyignore and opts.keyignore[key]
         or opts.valtypeignore and opts.valtypeignore[type(value)] -- skipping ignored value types
         or sparse and value == nil then -- skipping nils; do nothing
         elseif ktype == 'table' or ktype == 'function' or badtype[ktype] then
@@ -206,22 +221,26 @@ local function s(t, opts)
           local path = seen[t]..'['..tostring(seen[key] or globals[key] or gensym(key))..']'
           sref[#sref] = path..space..'='..space..tostring(seen[value] or val2str(value,nil,indent,path))
         else
-          out[#out+1] = val2str(value,key,indent,insref,seen[t],plainindex,level+1)
+          out[#out+1] = val2str(value,key,indent,nil,seen[t],plainindex,level+1)
+          if maxlen then
+            maxlen = maxlen - #out[#out]
+            if maxlen < 0 then break end
+          end
         end
       end
       local prefix = string.rep(indent or '', level)
       local head = indent and '{\n'..prefix..indent or '{'
       local body = table.concat(out, ','..(indent and '\n'..prefix..indent or space))
       local tail = indent and "\n"..prefix..'}' or '}'
-      return (custom and custom(tag,head,body,tail) or tag..head..body..tail)..comment(t, level)
+      return (custom and custom(tag,head,body,tail,level) or tag..head..body..tail)..comment(t, level)
     elseif badtype[ttype] then
       seen[t] = insref or spath
       return tag..globerr(t, level)
     elseif ttype == 'function' then
       seen[t] = insref or spath
+      if opts.nocode then return tag.."function() --[[..skipped..]] end"..comment(t, level) end
       local ok, res = pcall(string.dump, t)
-      local func = ok and ((opts.nocode and "function() --[[..skipped..]] end" or
-        "((loadstring or load)("..safestr(res)..",'@serialized'))")..comment(t, level))
+      local func = ok and "((loadstring or load)("..safestr(res)..",'@serialized'))"..comment(t, level)
       return tag..(func or globerr(t, level))
     else return tag..safestr(t) end -- handle all other types
   end
@@ -274,18 +293,31 @@ local function stack(start)
     local func = debug.getinfo(f, "f").func
     local i = 1
     local locals = {}
+    -- get locals
     while true do
       local name, value = debug.getlocal(f, i)
       if not name then break end
-      if string.sub(name, 1, 1) ~= '(' then locals[name] = {value, tostring(value)} end
+      if string.sub(name, 1, 1) ~= '(' then
+        locals[name] = {value, select(2,pcall(tostring,value))}
+      end
       i = i + 1
     end
+    -- get varargs (these use negative indices)
+    i = 1
+    while true do
+      local name, value = debug.getlocal(f, -i)
+      -- `not name` should be enough, but LuaJIT 2.0.0 incorrectly reports `(*temporary)` names here
+      if not name or name ~= "(*vararg)" then break end
+      locals[name:gsub("%)$"," "..i..")")] = {value, select(2,pcall(tostring,value))}
+      i = i + 1
+    end
+    -- get upvalues
     i = 1
     local ups = {}
-    while func and true do -- check for func as it may be nil for tail calls
+    while func do -- check for func as it may be nil for tail calls
       local name, value = debug.getupvalue(func, i)
       if not name then break end
-      ups[name] = {value, tostring(value)}
+      ups[name] = {value, select(2,pcall(tostring,value))}
       i = i + 1
     end
     return locals, ups
@@ -376,9 +408,12 @@ local function restore_vars(vars)
   end
 end
 
-local function capture_vars(level)
-  local vars = {}
-  local func = debug.getinfo(level or 3, "f").func
+local function capture_vars(level, thread)
+  level = (level or 0)+2 -- add two levels for this and debug calls
+  local func = (thread and debug.getinfo(thread, level, "f") or debug.getinfo(level, "f") or {}).func
+  if not func then return {} end
+
+  local vars = {['...'] = {}}
   local i = 1
   while true do
     local name, value = debug.getupvalue(func, i)
@@ -388,9 +423,28 @@ local function capture_vars(level)
   end
   i = 1
   while true do
-    local name, value = debug.getlocal(level or 3, i)
+    local name, value
+    if thread then
+      name, value = debug.getlocal(thread, level, i)
+    else
+      name, value = debug.getlocal(level, i)
+    end
     if not name then break end
     if string.sub(name, 1, 1) ~= '(' then vars[name] = value end
+    i = i + 1
+  end
+  -- get varargs (these use negative indices)
+  i = 1
+  while true do
+    local name, value
+    if thread then
+      name, value = debug.getlocal(thread, level, -i)
+    else
+      name, value = debug.getlocal(level, -i)
+    end
+    -- `not name` should be enough, but LuaJIT 2.0.0 incorrectly reports `(*temporary)` names here
+    if not name or name ~= "(*vararg)" then break end
+    vars['...'][i] = value
     i = i + 1
   end
   -- returned 'vars' table plays a dual role: (1) it captures local values
@@ -400,7 +454,7 @@ local function capture_vars(level)
   -- including access to globals, but this causes vars[name] to fail in
   -- restore_vars on local variables or upvalues with `nil` values when
   -- 'strict' is in effect. To avoid this `rawget` is used in restore_vars.
-  setmetatable(vars, { __index = getfenv(func), __newindex = getfenv(func) })
+  setmetatable(vars, { __index = getfenv(func), __newindex = getfenv(func), __mode = "v" })
   return vars
 end
 
@@ -485,6 +539,22 @@ local function handle_breakpoint(peer)
   buf = nil
 end
 
+local function normalize_path(file)
+  local n
+  repeat
+    file, n = file:gsub("/+%.?/+","/") -- remove all `//` and `/./` references
+  until n == 0
+  -- collapse all up-dir references: this will clobber UNC prefix (\\?\)
+  -- and disk on Windows when there are too many up-dir references: `D:\foo\..\..\bar`;
+  -- handle the case of multiple up-dir references: `foo/bar/baz/../../../more`;
+  -- only remove one at a time as otherwise `../../` could be removed;
+  repeat
+    file, n = file:gsub("[^/]+/%.%./", "", 1)
+  until n == 0
+  -- there may still be a leading up-dir reference left (as `/../` or `../`); remove it
+  return (file:gsub("^(/?)%.%./", "%1"))
+end
+
 local function debug_hook(event, line)
   -- (1) LuaJIT needs special treatment. Because debug_hook is set for
   -- *all* coroutines, and not just the one being debugged as in regular Lua
@@ -562,28 +632,26 @@ local function debug_hook(event, line)
       -- for example when they call loadstring('...', 'filename.lua').
       -- Unfortunately, there is no reliable/quick way to figure out
       -- what is the filename and what is the source code.
-      -- The following will work if the supplied filename uses Unix path.
-      if file:find("^@") then
-        file = file:gsub("^@", ""):gsub("\\", "/")
+      -- If the name doesn't start with `@`, assume it's a file name if it's all on one line.
+      if find(file, "^@") or not find(file, "[\r\n]") then
+        file = gsub(gsub(file, "^@", ""), "\\", "/")
+        -- normalize paths that may include up-dir or same-dir references
+        -- if the path starts from the up-dir or reference,
+        -- prepend `basedir` to generate absolute path to keep breakpoints working.
+        -- ignore qualified relative path (`D:../`) and UNC paths (`\\?\`)
+        if find(file, "^%.%./") then file = basedir..file end
+        if find(file, "/%.%.?/") then file = normalize_path(file) end
         -- need this conversion to be applied to relative and absolute
         -- file names as you may write "require 'Foo'" to
         -- load "foo.lua" (on a case insensitive file system) and breakpoints
         -- set on foo.lua will not work if not converted to the same case.
         if iscasepreserving then file = string.lower(file) end
-        if file:find("%./") == 1 then file = file:sub(3)
-        else file = file:gsub("^"..q(basedir), "") end
+        if find(file, "^%./") then file = sub(file, 3)
+        else file = gsub(file, "^"..q(basedir), "") end
         -- some file systems allow newlines in file names; remove these.
-        file = file:gsub("\n", ' ')
+        file = gsub(file, "\n", ' ')
       else
-        -- this is either a file name coming from loadstring("chunk", "file"),
-        -- or the actual source code that needs to be serialized (as it may
-        -- include newlines); assume it's a file name if it's all on one line.
-        if file:find("[\r\n]") then
-          file = mobdebug.line(file)
-        else
-          if iscasepreserving then file = string.lower(file) end
-          file = file:gsub("\\", "/"):gsub(file:find("^%./") and "^%./" or "^"..q(basedir), "")
-        end
+        file = mobdebug.line(file)
       end
 
       -- set to true if we got here; this only needs to be done once per
@@ -596,7 +664,7 @@ local function debug_hook(event, line)
 
     local vars, status, res
     if (watchescnt > 0) then
-      vars = capture_vars()
+      vars = capture_vars(1)
       for index, value in pairs(watches) do
         setfenv(value, vars)
         local ok, fired = pcall(value)
@@ -618,27 +686,23 @@ local function debug_hook(event, line)
       or is_pending(server))
 
     if getin then
-      vars = vars or capture_vars()
+      vars = vars or capture_vars(1)
       step_into = false
       step_over = false
       status, res = cororesume(coro_debugger, events.BREAK, vars, file, line)
     end
 
     -- handle 'stack' command that provides stack() information to the debugger
-    if status and res == 'stack' then
-      while status and res == 'stack' do
-        -- resume with the stack trace and variables
-        if vars then restore_vars(vars) end -- restore vars so they are reflected in stack values
-        -- this may fail if __tostring method fails at run-time
-        local ok, snapshot = pcall(stack, ngx and 5 or 4)
-        status, res = cororesume(coro_debugger, ok and events.STACK or events.BREAK, snapshot, file, line)
-      end
+    while status and res == 'stack' do
+      -- resume with the stack trace and variables
+      if vars then restore_vars(vars) end -- restore vars so they are reflected in stack values
+      status, res = cororesume(coro_debugger, events.STACK, stack(3), file, line)
     end
 
     -- need to recheck once more as resume after 'stack' command may
     -- return something else (for example, 'exit'), which needs to be handled
     if status and res and res ~= 'stack' then
-      if not abort and res == "exit" then os.exit(1, true); return end
+      if not abort and res == "exit" then mobdebug.onexit(1, true); return end
       if not abort and res == "done" then mobdebug.done(); return end
       abort = res
       -- only abort if safe; if not, there is another (earlier) check inside
@@ -655,12 +719,16 @@ local function debug_hook(event, line)
   end
 end
 
-local function stringify_results(status, ...)
+local function stringify_results(params, status, ...)
   if not status then return status, ... end -- on error report as it
+
+  params = params or {}
+  if params.nocode == nil then params.nocode = true end
+  if params.comment == nil then params.comment = 1 end
 
   local t = {...}
   for i,v in pairs(t) do -- stringify each of the returned values
-    local ok, res = pcall(mobdebug.line, v, {nocode = true, comment = 1})
+    local ok, res = pcall(mobdebug.line, v, params)
     t[i] = ok and res or ("%q"):format(res):gsub("\010","n"):gsub("\026","\\026")
   end
   -- stringify table with all returned values
@@ -756,15 +824,25 @@ local function debugger_loop(sev, svars, sfile, sline)
         server:send("400 Bad Request\n")
       end
     elseif command == "EXEC" then
+      -- extract any optional parameters
+      local params = string.match(line, "--%s*(%b{})%s*$")
       local _, _, chunk = string.find(line, "^[A-Z]+%s+(.+)$")
       if chunk then
         local func, res = mobdebug.loadstring(chunk)
         local status
         if func then
-          setfenv(func, eval_env)
-          status, res = stringify_results(pcall(func))
+          local pfunc = params and loadstring("return "..params) -- use internal function
+          params = pfunc and pfunc()
+          params = (type(params) == "table" and params or {})
+          local stack = tonumber(params.stack)
+          -- if the requested stack frame is not the current one, then use a new capture
+          -- with a specific stack frame: `capture_vars(0, coro_debugee)`
+          local env = stack and coro_debugee and capture_vars(stack-1, coro_debugee) or eval_env
+          setfenv(func, env)
+          status, res = stringify_results(params, pcall(func, unpack(env['...'] or {})))
         end
         if status then
+          if mobdebug.onscratch then mobdebug.onscratch(res) end
           server:send("200 OK " .. tostring(#res) .. "\n")
           server:send(res)
         else
@@ -906,7 +984,6 @@ local function debugger_loop(sev, svars, sfile, sline)
     elseif command == "SUSPEND" then
       -- do nothing; it already fulfilled its role
     elseif command == "DONE" then
-      server:send("200 OK\n")
       coroyield("done")
       return -- done with all the debugging
     elseif command == "STACK" then
@@ -922,7 +999,16 @@ local function debugger_loop(sev, svars, sfile, sline)
         server:send("401 Error in Execution " .. tostring(#vars) .. "\n")
         server:send(vars)
       else
-        local ok, res = pcall(mobdebug.dump, vars, {nocode = true, sparse = false})
+        local params = string.match(line, "--%s*(%b{})%s*$")
+        local pfunc = params and loadstring("return "..params) -- use internal function
+        params = pfunc and pfunc()
+        params = (type(params) == "table" and params or {})
+        if params.nocode == nil then params.nocode = true end
+        if params.sparse == nil then params.sparse = false end
+        -- take into account additional levels for the stack frames and data management
+        if tonumber(params.maxlevel) then params.maxlevel = tonumber(params.maxlevel)+4 end
+
+        local ok, res = pcall(mobdebug.dump, vars, params)
         if ok then
           server:send("200 OK " .. tostring(res) .. "\n")
         else
@@ -935,7 +1021,7 @@ local function debugger_loop(sev, svars, sfile, sline)
       if stream and mode and stream == "stdout" then
         -- assign "print" in the global environment
         local default = mode == 'd'
-        genv.print = default and iobase.print or coroutine.wrap(function()
+        genv.print = default and iobase.print or corowrap(function()
           -- wrapping into coroutine.wrap protects this function from
           -- being stepped through in the debugger.
           -- don't use vararg (...) as it adds a reference for its values,
@@ -961,6 +1047,10 @@ local function debugger_loop(sev, svars, sfile, sline)
       server:send("400 Bad Request\n")
     end
   end
+end
+
+local function output(stream, data)
+  if server then return server:send("204 Output "..stream.." "..tostring(#data).."\n"..data) end
 end
 
 local function connect(controller_host, controller_port)
@@ -997,31 +1087,35 @@ local function start(controller_host, controller_port)
     -- start from 16th frame, which is sufficiently large for this check.
     stack_level = stack_depth(16)
 
-    -- provide our own traceback function to report the error remotely
-    do
+    -- provide our own traceback function to report errors remotely
+    -- but only under Lua 5.1/LuaJIT as it's not called under Lua 5.2+
+    -- (http://lua-users.org/lists/lua-l/2016-05/msg00297.html)
+    local function f() return function()end end
+    if f() ~= f() then -- Lua 5.1 or LuaJIT
       local dtraceback = debug.traceback
       debug.traceback = function (...)
         if select('#', ...) >= 1 then
-          local err, lvl = ...
-          if err and type(err) ~= 'thread' then
-            local trace = dtraceback(err, (lvl or 2)+1)
-            if genv.print == iobase.print then -- no remote redirect
-              return trace
-            else
-              genv.print(trace) -- report the error remotely
-              return -- don't report locally to avoid double reporting
-            end
+          local thr, err, lvl = ...
+          if type(thr) ~= 'thread' then err, lvl = thr, err end
+          local trace = dtraceback(err, (lvl or 1)+1)
+          if genv.print == iobase.print then -- no remote redirect
+            return trace
+          else
+            genv.print(trace) -- report the error remotely
+            return -- don't report locally to avoid double reporting
           end
         end
         -- direct call to debug.traceback: return the original.
         -- debug.traceback(nil, level) doesn't work in Lua 5.1
         -- (http://lua-users.org/lists/lua-l/2011-06/msg00574.html), so
         -- simply remove first frame from the stack trace
-        return (dtraceback(...):gsub("(stack traceback:\n)[^\n]*\n", "%1"))
+        local tb = dtraceback("", 2) -- skip debugger frames
+        -- if the string is returned, then remove the first new line as it's not needed
+        return type(tb) == "string" and tb:gsub("^\n","") or tb
       end
     end
     coro_debugger = corocreate(debugger_loop)
-    debug.sethook(debug_hook, "lcr")
+    debug.sethook(debug_hook, HOOKMASK)
     seen_hook = nil -- reset in case the last start() call was refused
     step_into = true -- start with step command
     return true
@@ -1061,17 +1155,21 @@ local function controller(controller_host, controller_port, scratchpad)
       if scratchpad then checkcount = mobdebug.checkcount end -- force suspend right away
 
       coro_debugee = corocreate(debugee)
-      debug.sethook(coro_debugee, debug_hook, "lcr")
-      local status, err = cororesume(coro_debugee)
+      debug.sethook(coro_debugee, debug_hook, HOOKMASK)
+      local status, err = cororesume(coro_debugee, unpack(arg or {}))
 
       -- was there an error or is the script done?
       -- 'abort' state is allowed here; ignore it
       if abort then
         if tostring(abort) == 'exit' then break end
       else
-        if status then -- normal execution is done
-          break
-        elseif err and not tostring(err):find(deferror) then
+        if status then -- no errors
+          if corostatus(coro_debugee) == "suspended" then
+            -- the script called `coroutine.yield` in the "main" thread
+            error("attempt to yield from the main thread", 3)
+          end
+          break -- normal execution is done
+        elseif err and not string.find(tostring(err), deferror) then
           -- report the error back
           -- err is not necessarily a string, so convert to string to report
           report(debug.traceback(coro_debugee), tostring(err))
@@ -1079,14 +1177,14 @@ local function controller(controller_host, controller_port, scratchpad)
           -- check if the debugging is done (coro_debugger is nil)
           if not coro_debugger then break end
           -- resume once more to clear the response the debugger wants to send
-          -- need to use capture_vars(2) as three would be the level of
-          -- the caller for controller(), but because of the tail call,
-          -- the caller may not exist;
+          -- need to use capture_vars(0) to capture only two (default) level,
+          -- as even though there is controller() call, because of the tail call,
+          -- the caller may not exist for it;
           -- This is not entirely safe as the user may see the local
           -- variable from console, but they will be reset anyway.
           -- This functionality is used when scratchpad is paused to
           -- gain access to remote console to modify global variables.
-          local status, err = cororesume(coro_debugger, events.RESTART, capture_vars(2))
+          local status, err = cororesume(coro_debugger, events.RESTART, capture_vars(0))
           if not status or status and err == "exit" then break end
         end
       end
@@ -1116,10 +1214,10 @@ local function on()
   if main then co = nil end
   if co then
     coroutines[co] = true
-    debug.sethook(co, debug_hook, "lcr")
+    debug.sethook(co, debug_hook, HOOKMASK)
   else
     if jit then coroutines.main = true end
-    debug.sethook(debug_hook, "lcr")
+    debug.sethook(debug_hook, HOOKMASK)
   end
 end
 
@@ -1153,8 +1251,12 @@ end
 
 -- Handles server debugging commands
 local function handle(params, client, options)
-  local _, _, command = string.find(params, "^([a-z]+)")
+  -- when `options.verbose` is not provided, use normal `print`; verbose output can be
+  -- disabled (`options.verbose == false`) or redirected (`options.verbose == function()...end`)
+  local verbose = not options or options.verbose ~= nil and options.verbose
+  local print = verbose and (type(verbose) == "function" and verbose or print) or function() end
   local file, line, watch_idx
+  local _, _, command = string.find(params, "^([a-z]+)")
   if command == "run" or command == "step" or command == "out"
   or command == "over" or command == "exit" then
     client:send(string.upper(command) .. "\n")
@@ -1164,8 +1266,7 @@ local function handle(params, client, options)
       local breakpoint = client:receive()
       if not breakpoint then
         print("Program finished")
-        os.exit(0, true)
-        return -- use return here for those cases where os.exit() is not wanted
+        return nil, nil, false
       end
       local _, _, status = string.find(breakpoint, "^(%d+)")
       if status == "200" then
@@ -1183,7 +1284,8 @@ local function handle(params, client, options)
       elseif status == "204" then
         local _, _, stream, size = string.find(breakpoint, "^204 Output (%w+) (%d+)$")
         if stream and size then
-          local msg = client:receive(tonumber(size))
+          local size = tonumber(size)
+          local msg = size > 0 and client:receive(size) or ""
           print(msg)
           if outputs[stream] then outputs[stream](msg) end
           -- this was just the output, so go back reading the response
@@ -1194,24 +1296,17 @@ local function handle(params, client, options)
         if size then
           local msg = client:receive(tonumber(size))
           print("Error in remote application: " .. msg)
-          os.exit(1, true)
-          return nil, nil, msg -- use return here for those cases where os.exit() is not wanted
+          return nil, nil, msg
         end
       else
         print("Unknown error")
-        os.exit(1, true)
-        -- use return here for those cases where os.exit() is not wanted
         return nil, nil, "Debugger error: unexpected response '" .. breakpoint .. "'"
       end
       if done then break end
     end
   elseif command == "done" then
     client:send(string.upper(command) .. "\n")
-    if client:receive() ~= "200 OK" then
-      print("Unknown error")
-      os.exit(1, true)
-      return nil, nil, "Debugger error: unexpected response after DONE"
-    end
+    -- no response is expected
   elseif command == "setb" or command == "asetb" then
     _, _, _, file, line = string.find(params, "^([a-z]+)%s+(.-)%s+(%d+)%s*$")
     if file and line then
@@ -1310,9 +1405,9 @@ local function handle(params, client, options)
       elseif command == "reload" then
         client:send("LOAD 0 -\n")
       elseif command == "loadstring" then
-        local _, _, _, file, lines = string.find(exp, "^([\"'])(.-)%1%s+(.+)")
+        local _, _, _, file, lines = string.find(exp, "^([\"'])(.-)%1%s(.+)")
         if not file then
-           _, _, file, lines = string.find(exp, "^(%S+)%s+(.+)")
+           _, _, file, lines = string.find(exp, "^(%S+)%s(.+)")
         end
         client:send("LOAD " .. tostring(#lines) .. " " .. file .. "\n")
         client:send(lines)
@@ -1371,7 +1466,8 @@ local function handle(params, client, options)
         elseif status == "204" then
           local _, _, stream, size = string.find(params, "^204 Output (%w+) (%d+)$")
           if stream and size then
-            local msg = client:receive(tonumber(size))
+            local size = tonumber(size)
+            local msg = size > 0 and client:receive(size) or ""
             print(msg)
             if outputs[stream] then outputs[stream](msg) end
             -- this was just the output, so go back reading the response
@@ -1404,7 +1500,8 @@ local function handle(params, client, options)
   elseif command == "suspend" then
     client:send("SUSPEND\n")
   elseif command == "stack" then
-    client:send("STACK\n")
+    local opts = string.match(params, "^[a-z]+%s+(.+)$")
+    client:send("STACK" .. (opts and " "..opts or "") .."\n")
     local resp = client:receive()
     local _, _, status, res = string.find(resp, "^(%d+)%s+%w+%s+(.+)%s*$")
     if status == "200" then
@@ -1436,11 +1533,18 @@ local function handle(params, client, options)
     local _, _, stream, mode = string.find(params, "^[a-z]+%s+(%w+)%s+([dcr])%s*$")
     if stream and mode then
       client:send("OUTPUT "..stream.." "..mode.."\n")
-      local resp = client:receive()
+      local resp, err = client:receive()
+      if not resp then
+        print("Unknown error: "..err)
+        return nil, nil, "Debugger connection error: "..err
+      end
       local _, _, status = string.find(resp, "^(%d+)%s+%w+%s*$")
       if status == "200" then
         print("Stream "..stream.." redirected")
         outputs[stream] = type(options) == 'table' and options.handler or nil
+      -- the client knows when she is doing, so install the handler
+      elseif type(options) == 'table' and options.handler then
+        outputs[stream] = options.handler
       else
         print("Unknown error")
         return nil, nil, "Debugger error: can't redirect "..stream
@@ -1462,7 +1566,7 @@ local function handle(params, client, options)
       local resp, err = client:receive()
       if not resp then
         print("Unknown error: "..err)
-        return nil, nil, "Debugger connection closed"
+        return nil, nil, "Debugger connection error: "..err
       end
       local _, _, status = string.find(resp, "^(%d+)%s+%w+%s*$")
       if status == "200" then
@@ -1498,7 +1602,9 @@ local function handle(params, client, options)
     print("exit                  -- exits debugger and the application")
   else
     local _, _, spaces = string.find(params, "^(%s*)$")
-    if not spaces then
+    if spaces then
+      return nil, nil, "Empty command"
+    else
       print("Invalid command")
       return nil, nil, "Invalid command"
     end
@@ -1537,9 +1643,11 @@ local function listen(host, port)
 
   while true do
     io.write("> ")
-    local line = io.read("*line")
-    handle(line, client)
+    local file, line, err = handle(io.read("*line"), client)
+    if not file and err == false then break end -- completed debugging
   end
+
+  client:close()
 end
 
 local cocreate
@@ -1591,10 +1699,9 @@ mobdebug.coro = coro
 mobdebug.done = done
 mobdebug.pause = function() step_into = true end
 mobdebug.yield = nil -- callback
+mobdebug.output = output
+mobdebug.onexit = os and os.exit or done
+mobdebug.onscratch = nil -- callback
 mobdebug.basedir = function(b) if b then basedir = b end return basedir end
-
--- this is needed to make "require 'modebug'" to work when mobdebug
--- module is loaded manually
-package.loaded.mobdebug = mobdebug
 
 return mobdebug
