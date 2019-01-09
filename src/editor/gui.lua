@@ -173,7 +173,8 @@ end
 local function getTabWindow(event, nb)
   local tabctrl = event:GetEventObject():DynamicCast("wxAuiTabCtrl")
   local idx = event:GetSelection() -- index within the current tab ctrl
-  return idx ~= wx.wxNOT_FOUND and nb:GetPageIndex(tabctrl:GetPage(idx).window) or wx.wxNOT_FOUND, tabctrl
+  local win = tabctrl:GetPage(idx).window
+  return win and idx ~= wx.wxNOT_FOUND and nb:GetPageIndex(win) or wx.wxNOT_FOUND, tabctrl
 end
 
 local function isPreview(win)
@@ -182,22 +183,31 @@ end
 
 local function createNotebook(frame)
   -- notebook for editors
-  local notebook = wxaui.wxAuiNotebook(frame, wx.wxID_ANY,
+  local notebook = ide:CreateNotebook(frame, wx.wxID_ANY,
     wx.wxDefaultPosition, wx.wxDefaultSize,
     wxaui.wxAUI_NB_DEFAULT_STYLE + wxaui.wxAUI_NB_TAB_EXTERNAL_MOVE
     + wxaui.wxAUI_NB_WINDOWLIST_BUTTON + wx.wxNO_BORDER)
 
+  -- there is a protected method in wxwidgets, but it's not available in wxlua,
+  -- so use a workaround to find the tab control that the page belongs to.
+  function notebook:GetTabCtrl(win)
+    local pg = win and self:GetPageIndex(win) >= 0 and win or self:GetCurrentPage()
+    if not pg then return nil end
+    local px,py = pg:GetScreenPosition():GetXY()
+    local point = wx.wxPoint(px,py-10) -- right above the page in the notebook
+    local ctrl = wx.wxFindWindowAtPoint(point)
+    return ctrl and ctrl:DynamicCast("wxAuiTabCtrl") or nil
+  end
+
   -- wxEVT_SET_FOCUS could be used, but it only works on Windows with wx2.9.5+
   notebook:Connect(wxaui.wxEVT_COMMAND_AUINOTEBOOK_PAGE_CHANGED,
     function (event)
-      local ed = ide:GetEditor(notebook:GetSelection())
-      local doc = ed and ide:GetDocument(ed)
+      local doc = ide:GetDocument(notebook:GetCurrentPage())
 
       -- skip activation when any of the following is true:
       -- (1) there is no document yet, the editor tab was just added,
       -- so no changes needed as there will be a proper later call;
-      -- (2) the page change event was triggered after a tab is closed;
-      -- (3) on OSX from AddPage event when changing from the last tab
+      -- (2) on OSX from AddPage event when changing from the last tab
       -- (this is to work around a duplicate event generated in this case
       -- that first activates the added tab and then some other tab (2.9.5)).
 
@@ -205,15 +215,22 @@ local function createNotebook(frame)
         and event:GetOldSelection() == notebook:GetPageCount()
         and debug:traceback():find("'AddPage'"))
 
-      if doc and event:GetOldSelection() ~= wx.wxNOT_FOUND and not double then
-        SetEditorSelection(notebook:GetSelection())
+      if doc and doc:GetTabIndex() and not double then
+        doc:SetActive()
       end
     end)
 
   notebook:Connect(wxaui.wxEVT_COMMAND_AUINOTEBOOK_PAGE_CLOSE,
     function (event)
       local idx = event:GetSelection()
-      if idx ~= wx.wxNOT_FOUND then ClosePage(idx) end
+      if idx ~= wx.wxNOT_FOUND then
+        local doc = ide:GetDocument(notebook:GetPage(idx))
+        if doc then
+          -- make sure that the doc is in the same notebook and is not moved somewhere
+          local i, nb = doc:GetTabIndex()
+          if i == idx and nb == notebook then doc:Close() end
+        end
+      end
       event:Veto() -- don't propagate the event as the page is already closed
     end)
 
@@ -242,19 +259,14 @@ local function createNotebook(frame)
   if ide.wxver >= "2.9.5" then
     notebook:Connect(wxaui.wxEVT_COMMAND_AUINOTEBOOK_END_DRAG,
       function (event)
-        for page = 0, notebook:GetPageCount()-1 do
-          local editor = ide:GetEditor(page)
-          local doc = editor and ide:GetDocument(editor)
-          if doc then doc:SetTabIndex(page) end
-        end
-
         local selection = getTabWindow(event, notebook)
         if selection == wx.wxNOT_FOUND then return end
         -- set the selection on the dragged tab to reset its state
         -- workaround for wxwidgets issue http://trac.wxwidgets.org/ticket/15071
         notebook:SetSelection(selection)
         -- select the content of the tab after drag is done
-        SetEditorSelection(selection)
+        local doc = ide:GetDocument(notebook:GetPage(selection))
+        if doc then doc:SetActive() end
         event:Skip()
       end)
   end
@@ -269,8 +281,13 @@ local function createNotebook(frame)
       if idx == wx.wxNOT_FOUND then return end
       local tabctrl = event:GetEventObject():DynamicCast("wxAuiTabCtrl")
 
+      -- save the editor from the tab initiating the event
+      selection = tabctrl:GetPage(idx).window
       -- save tab index the event is for
-      selection = notebook:GetPageIndex(tabctrl:GetPage(idx).window)
+      local curindex = notebook:GetSelection()
+      local selindex = notebook:GetPageIndex(selection)
+      if curindex ~= selindex then notebook:SetSelection(selindex) end
+
       local tree = ide:GetProjectTree()
       local startfile = tree:GetStartFile()
 
@@ -291,35 +308,37 @@ local function createNotebook(frame)
         { ID.REFRESHSEARCHRESULTS, TR("Refresh Search Results") },
       }
 
-      local fpath = ide:GetDocument(ide:GetEditor(selection)):GetFilePath()
+      local fpath = ide:GetDocument(selection):GetFilePath()
       if not fpath or not tree:FindItem(fpath) then menu:Enable(ID.SETSTARTFILE, false) end
       if not startfile then menu:Destroy(ID.UNSETSTARTFILE) end
 
-      PackageEventHandle("onMenuEditorTab", menu, notebook, event, selection)
+      PackageEventHandle("onMenuEditorTab", menu, notebook, event, notebook:GetPageIndex(selection))
 
       -- popup statuses are not refreshed on Linux, so do it manually
       if ide.osname == "Unix" then UpdateMenuUI(menu, notebook) end
       notebook:PopupMenu(menu)
+      -- restore selection if it has changed
+      if curindex ~= selindex then notebook:SetSelection(curindex) end
     end)
 
   local function IfAtLeastOneTab(event) event:Enable(notebook:GetPageCount() > 0) end
 
   notebook:Connect(ID.SETSTARTFILE, wx.wxEVT_COMMAND_MENU_SELECTED, function()
-      local fpath = ide:GetDocument(ide:GetEditor(selection)):GetFilePath()
+      local fpath = ide:GetDocument(selection):GetFilePath()
       if fpath then ide:GetProjectTree():SetStartFile(fpath) end
     end)
   notebook:Connect(ID.UNSETSTARTFILE, wx.wxEVT_COMMAND_MENU_SELECTED, function()
       ide:GetProjectTree():SetStartFile()
     end)
   notebook:Connect(ID.SAVE, wx.wxEVT_COMMAND_MENU_SELECTED, function()
-      ide:GetDocument(ide:GetEditor(selection)):Save()
+      ide:GetDocument(selection):Save()
     end)
   notebook:Connect(ID.SAVE, wx.wxEVT_UPDATE_UI, function(event)
-      local doc = ide:GetDocument(ide:GetEditor(selection))
+      local doc = ide:GetDocument(selection)
       event:Enable(doc:IsModified() or doc:IsNew())
     end)
   notebook:Connect(ID.SAVEAS, wx.wxEVT_COMMAND_MENU_SELECTED, function()
-      SaveFileAs(ide:GetEditor(selection))
+      SaveFileAs(selection)
     end)
   notebook:Connect(ID.SAVEAS, wx.wxEVT_UPDATE_UI, IfAtLeastOneTab)
 
@@ -328,19 +347,23 @@ local function createNotebook(frame)
   -- (http://trac.wxwidgets.org/ticket/15417)
   notebook:Connect(ID.CLOSE, wx.wxEVT_UPDATE_UI, IfAtLeastOneTab)
   notebook:Connect(ID.CLOSE, wx.wxEVT_COMMAND_MENU_SELECTED, function()
-      ide:DoWhenIdle(function() ClosePage(selection) end)
+      ide:DoWhenIdle(function() ide:GetDocument(selection):Close() end)
     end)
 
   notebook:Connect(ID.CLOSEALL, wx.wxEVT_UPDATE_UI, IfAtLeastOneTab)
   notebook:Connect(ID.CLOSEALL, wx.wxEVT_COMMAND_MENU_SELECTED, function()
-      ide:DoWhenIdle(function() CloseAllPagesExcept(nil) end)
+      ide:DoWhenIdle(function()
+          ide:GetDocument(selection):CloseAll({scope = "section"})
+        end)
     end)
 
   notebook:Connect(ID.CLOSEOTHER, wx.wxEVT_UPDATE_UI, function(event)
       event:Enable(notebook:GetPageCount() > 1)
     end)
   notebook:Connect(ID.CLOSEOTHER, wx.wxEVT_COMMAND_MENU_SELECTED, function()
-      ide:DoWhenIdle(function() CloseAllPagesExcept(selection) end)
+      ide:DoWhenIdle(function()
+          ide:GetDocument(selection):CloseAll({keep = true, scope = "section"})
+        end)
     end)
 
   notebook:Connect(ID.CLOSESEARCHRESULTS, wx.wxEVT_UPDATE_UI, function(event)
@@ -353,25 +376,26 @@ local function createNotebook(frame)
   notebook:Connect(ID.CLOSESEARCHRESULTS, wx.wxEVT_COMMAND_MENU_SELECTED, function()
       ide:DoWhenIdle(function()
           for p = notebook:GetPageCount()-1, 0, -1 do
-            if isPreview(notebook:GetPage(p)) then ClosePage(p) end
+            local editor = notebook:GetPage(p)
+            if isPreview(editor) then ide:GetDocument(editor):Close() end
           end
         end)
     end)
 
   notebook:Connect(ID.REFRESHSEARCHRESULTS, wx.wxEVT_UPDATE_UI, function(event)
-      event:Enable(isPreview(notebook:GetPage(selection)))
+      event:Enable(isPreview(selection))
     end)
   notebook:Connect(ID.REFRESHSEARCHRESULTS, wx.wxEVT_COMMAND_MENU_SELECTED, function()
-      ide.findReplace:RefreshResults(notebook:GetPage(selection))
+      ide.findReplace:RefreshResults(selection)
     end)
 
   notebook:Connect(ID.SHOWLOCATION, wx.wxEVT_COMMAND_MENU_SELECTED, function()
-      ShowLocation(ide:GetDocument(ide:GetEditor(selection)):GetFilePath())
+      ShowLocation(ide:GetDocument(selection):GetFilePath())
     end)
   notebook:Connect(ID.SHOWLOCATION, wx.wxEVT_UPDATE_UI, IfAtLeastOneTab)
 
   notebook:Connect(ID.COPYFULLPATH, wx.wxEVT_COMMAND_MENU_SELECTED, function()
-      ide:CopyToClipboard(ide:GetDocument(ide:GetEditor(selection)):GetFilePath())
+      ide:CopyToClipboard(ide:GetDocument(selection):GetFilePath())
     end)
 
   frame.notebook = notebook
@@ -494,7 +518,7 @@ end
 
 local function createBottomNotebook(frame)
   -- bottomnotebook (errorlog,shellbox)
-  local bottomnotebook = wxaui.wxAuiNotebook(frame, wx.wxID_ANY,
+  local bottomnotebook = ide:CreateNotebook(frame, wx.wxID_ANY,
     wx.wxDefaultPosition, wx.wxDefaultSize,
     wxaui.wxAUI_NB_DEFAULT_STYLE + wxaui.wxAUI_NB_TAB_EXTERNAL_MOVE
     - wxaui.wxAUI_NB_CLOSE_ON_ACTIVE_TAB + wx.wxNO_BORDER)
@@ -656,7 +680,7 @@ local function createBottomNotebook(frame)
 end
 
 local function createProjNotebook(frame)
-  local projnotebook = wxaui.wxAuiNotebook(frame, wx.wxID_ANY,
+  local projnotebook = ide:CreateNotebook(frame, wx.wxID_ANY,
     wx.wxDefaultPosition, wx.wxDefaultSize,
     wxaui.wxAUI_NB_DEFAULT_STYLE + wxaui.wxAUI_NB_TAB_EXTERNAL_MOVE
     - wxaui.wxAUI_NB_CLOSE_ON_ACTIVE_TAB + wx.wxNO_BORDER)
@@ -692,7 +716,7 @@ do
     CenterPane():PaneBorder(false))
   mgr:AddPane(frame.projnotebook, wxaui.wxAuiPaneInfo():
     Name("projpanel"):CaptionVisible(false):
-    MinSize(200,200):FloatingSize(200,400):
+    MinSize(200,200):BestSize(300,300):FloatingSize(200,400):
     Left():Layer(1):Position(1):PaneBorder(false):
     CloseButton(true):MaximizeButton(false):PinButton(true))
   mgr:AddPane(frame.bottomnotebook, wxaui.wxAuiPaneInfo():

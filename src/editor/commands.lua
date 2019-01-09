@@ -10,17 +10,17 @@ local uimgr = frame.uimgr
 local unpack = table.unpack or unpack
 
 local CURRENT_LINE_MARKER = StylesGetMarker("currentline")
-local CURRENT_LINE_MARKER_VALUE = 2^CURRENT_LINE_MARKER
 
 function NewFile(filename)
   filename = filename or ide:GetDefaultFileName()
   local editor = CreateEditor()
-  editor:SetupKeywords(GetFileExt(filename))
   local doc = AddEditor(editor, filename)
-  if doc then
-    SetEditorSelection(doc.index)
-    PackageEventHandle("onEditorNew", editor)
+  if not doc then
+    editor:Destroy()
+    return
   end
+  doc:SetActive()
+  PackageEventHandle("onEditorNew", editor)
   return editor
 end
 
@@ -56,15 +56,11 @@ function LoadFile(filePath, editor, file_must_exist, skipselection)
   end
 
   -- prevent files from being reopened again
-  if (not editor) then
+  if not editor then
     local doc = ide:FindDocument(filePath)
     if doc then
-      if not skipselection and doc.index ~= notebook:GetSelection() then
-        -- selecting the same tab doesn't trigger PAGE_CHANGE event,
-        -- but moves the focus to the tab bar, which needs to be avoided.
-        notebook:SetSelection(doc.index)
-      end
-      return doc.editor
+      if not skipselection then doc:SetActive() end
+      return doc:GetEditor()
     end
   end
 
@@ -203,7 +199,7 @@ function LoadFile(filePath, editor, file_must_exist, skipselection)
 
   -- activate the editor; this is needed for those cases when the editor is
   -- created from some other element, for example, from a project tree.
-  if not skipselection then SetEditorSelection() end
+  if not skipselection then doc:SetActive() end
 
   PackageEventHandle("onEditorLoad", editor)
 
@@ -304,10 +300,11 @@ function SaveFile(editor, filePath)
     if ok then
       editor:SetSavePoint()
       local doc = ide:GetDocument(editor)
-      doc.filePath = filePath
-      doc.fileName = wx.wxFileName(filePath):GetFullName()
-      doc.modTime = GetFileModTime(filePath)
+      doc:SetFilePath(filePath)
+      doc:SetFileName(wx.wxFileName(filePath):GetFullName())
+      doc:SetFileModifiedTime(GetFileModTime(filePath))
       doc:SetTabText(doc:GetFileName())
+      ide:SetTitle() -- update title of the main window
       SetAutoRecoveryMark()
       FileTreeMarkSelected(filePath)
 
@@ -334,6 +331,7 @@ function SaveFileAs(editor)
   local document = ide:GetDocument(editor)
   local filePath = (document and document:GetFilePath()
     or ((ide:GetProject() or "")..(document and document:GetFileName() or ide.config.default.name)))
+  if document then document:SetActive() end
 
   local fn = wx.wxFileName(filePath)
   fn:Normalize() -- want absolute path for dialog
@@ -356,26 +354,14 @@ function SaveFileAs(editor)
     local filePath = fileDialog:GetPath()
 
     -- check if there is another tab with the same name and prepare to close it
-    local existing = (ide:FindDocument(filePath) or {}).index
+    local doc = ide:FindDocument(filePath)
     local cansave = fn:GetFullName() == filePath -- saving into the same file
        or not wx.wxFileName(filePath):FileExists() -- or a new file
        or ApproveFileOverwrite()
 
     if cansave and SaveFile(editor, filePath) then
-      SetEditorSelection() -- update title of the editor
-      -- new extension, this will reset keywords and indicators
-      if ext ~= GetFileExt(filePath) then LoadFile(filePath, editor) end
       saved = true
-
-      if existing then
-        -- save the current selection as it may change after closing
-        local current = notebook:GetSelection()
-        ClosePage(existing)
-        -- restore the selection if it changed
-        if current ~= notebook:GetSelection() then
-          notebook:SetSelection(current)
-        end
-      end
+      if doc then doc:Close() end
     end
   end
 
@@ -393,98 +379,13 @@ function SaveAll(quiet)
   end
 end
 
-local function removePage(index)
-  local prevIndex = nil
-  local nextIndex = nil
-  
-  -- try to preserve old selection
-  local selectIndex = notebook:GetSelection()
-  selectIndex = selectIndex ~= index and selectIndex
-
-  for _, document in ipairs(ide:GetDocumentList()) do
-    local wasselected = document.index == selectIndex
-    if document.index < index then
-      prevIndex = document.index
-    elseif document.index == index then
-      ide:RemoveDocument(document.editor)
-    elseif document.index > index then
-      document.index = document.index - 1
-      if nextIndex == nil then
-        nextIndex = document.index
-      end
-    end
-    if (wasselected) then
-      selectIndex = document.index
-    end
-  end
-
-  notebook:RemovePage(index)
-  
-  if selectIndex then
-    notebook:SetSelection(selectIndex)
-  elseif nextIndex then
-    notebook:SetSelection(nextIndex)
-  elseif prevIndex then
-    notebook:SetSelection(prevIndex)
-  end
-
-  -- need to set editor selection as it's called *after* PAGE_CHANGED event
-  SetEditorSelection()
-end
-
-function ClosePage(selection)
-  local editor = ide:GetEditor(selection)
-
-  if PackageEventHandle("onEditorPreClose", editor) == false then
-    return false
-  end
-
-  if SaveModifiedDialog(editor, true) ~= wx.wxID_CANCEL then
-    DynamicWordsRemoveAll(editor)
-    local debugger = ide:GetDebugger()
-    -- check if the window with the scratchpad running is being closed
-    if debugger and debugger.scratchpad and debugger.scratchpad.editors
-    and debugger.scratchpad.editors[editor] then
-      debugger:ScratchpadOff()
-    end
-    -- check if the debugger is running and is using the current window;
-    -- abort the debugger if the current marker is in the window being closed
-    if debugger and debugger:IsConnected() and
-      (editor:MarkerNext(0, CURRENT_LINE_MARKER_VALUE) >= 0) then
-      debugger:Stop()
-    end
-    PackageEventHandle("onEditorClose", editor)
-    removePage(ide:GetDocument(editor):GetTabIndex())
-
-    -- disable full screen if the last tab is closed
-    if not (notebook:GetSelection() >= 0) then ide:ShowFullScreen(false) end
-    return true
-  end
-  return false
-end
-
-function CloseAllPagesExcept(selection)
-  local toclose = {}
-  for _, document in ipairs(ide:GetDocumentList()) do
-    table.insert(toclose, document:GetTabIndex())
-  end
-
-  -- close pages for those files that match the project in the reverse order
-  -- (as ids shift when pages are closed)
-  for i = #toclose, 1, -1 do
-    if toclose[i] ~= selection then
-      if not ide:GetDocument(notebook:GetPage(toclose[i])):Close() then break end
-    end
-  end
-end
-
 -- Show a dialog to save a file before closing editor.
 -- returns wxID_YES, wxID_NO, or wxID_CANCEL if allow_cancel
 function SaveModifiedDialog(editor, allow_cancel)
   local result = wx.wxID_NO
   local document = ide:GetDocument(editor)
-  if document:IsModified() then
-    document:GetEditor():SetFocus()
+  if document and document:IsModified() then
+    document:SetActive()
     local message = TR("Do you want to save the changes to '%s'?")
       :format(document:GetFileName() or ide.config.default.name)
     local dlg_styles = wx.wxYES_NO + wx.wxCENTRE + wx.wxICON_QUESTION
@@ -594,7 +495,7 @@ end
 
 function SaveIfModified(editor)
   local doc = ide:GetDocument(editor)
-  if doc:IsModified() or doc:IsNew() then
+  if doc and doc:IsModified() or doc:IsNew() then
     local saved = false
     if doc:IsNew() then
       local ret = wx.wxMessageBox(
@@ -634,8 +535,8 @@ function SetOpenFiles(nametab,params)
     local editor = LoadFile(doc.filename,nil,true,true) -- skip selection
     if editor then editor:GotoPosDelayed(doc.cursorpos or 0) end
   end
-  notebook:SetSelection(params and params.index or 0)
-  SetEditorSelection()
+  local doc = ide:GetDocument(notebook:GetPage(params and params.index or 0))
+  if doc then doc:SetActive() end
 end
 
 function ProjectConfig(dir, config)
@@ -671,7 +572,6 @@ function SetOpenTabs(params)
     end
   end
   notebook:SetSelection(params and params.index or 0)
-  SetEditorSelection()
 end
 
 local function getOpenTabs()
@@ -730,15 +630,6 @@ local function saveAutoRecovery(force)
   ide:SetStatus(TR("Saved auto-recover at %s."):format(os.date("%H:%M:%S")))
 end
 
-local function fastWrap(func, ...)
-  -- ignore SetEditorSelection that is not needed as `func` may work on
-  -- multipe files, but editor needs to be selected once.
-  local SES = SetEditorSelection
-  SetEditorSelection = function() end
-  func(...)
-  SetEditorSelection = SES
-end
-
 function StoreRestoreProjectTabs(curdir, newdir, intfname)
   local win = ide.osname == 'Windows'
   local interpreter = intfname or ide.interpreter.fname
@@ -749,7 +640,7 @@ function StoreRestoreProjectTabs(curdir, newdir, intfname)
   if curdir and #curdir > 0 then
     local lowcurdir = win and string.lower(curdir) or curdir
     local lownewdir = win and string.lower(newdir) or newdir
-    local projdocs, closdocs = {}, {}
+    local projdocs = {}
     for _, document in ipairs(GetOpenFiles()) do
       local dpath = win and string.lower(document.filename) or document.filename
       -- check if the filename is in the same folder
@@ -757,11 +648,6 @@ function StoreRestoreProjectTabs(curdir, newdir, intfname)
       and dpath:find("^[\\/]", #lowcurdir+1) then
         table.insert(projdocs, document)
         closing = closing + (document.id < current and 1 or 0)
-        -- only close if the file is not in new project as it would be reopened
-        if not dpath:find(lownewdir, 1, true)
-        or not dpath:find("^[\\/]", #lownewdir+1) then
-          table.insert(closdocs, document)
-        end
       elseif document.id == current then restore = true end
     end
 
@@ -772,16 +658,16 @@ function StoreRestoreProjectTabs(curdir, newdir, intfname)
     ProjectConfig(curdir, {projdocs,
       {index = notebook:GetSelection() - current, interpreter = interpreter}})
 
-    -- close pages for those files that match the project in the reverse order
-    -- (as ids shift when pages are closed)
-    for i = #closdocs, 1, -1 do fastWrap(ClosePage, closdocs[i].id) end
+    local editor = ide:GetEditor()
+    local doc = editor and ide:GetDocument(editor)
+    if doc then doc:CloseAll({scope = "project"}) end
   end
 
   local files, params = ProjectConfig(newdir)
   if files then
     -- provide fake index so that it doesn't activate it as the index may be not
     -- quite correct if some of the existing files are already open in the IDE.
-    fastWrap(SetOpenFiles, files, {index = #files + notebook:GetPageCount()})
+    SetOpenFiles(files, {index = #files + notebook:GetPageCount()})
   end
 
   -- either interpreter is chosen for the project or the default value is set
@@ -797,7 +683,6 @@ function StoreRestoreProjectTabs(curdir, newdir, intfname)
   elseif index and index >= 0 and files[index+1] then
     -- move the editor tab to the front with the file from the config
     LoadFile(files[index+1].filename, nil, true)
-    SetEditorSelection() -- activate the editor in the active tab
   end
 
   -- remove current config as it may change; the current configuration is

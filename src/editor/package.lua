@@ -141,25 +141,33 @@ function ide:GetDefaultFileName()
   if ed and default.usecurrentextension then ext = self:GetDocument(ed):GetFileExt() end
   return default.name..(ext and ext > "" and "."..ext or "")
 end
-function ide:GetEditor(index)
-  local notebook = self:GetEditorNotebook()
-  if index == nil then index = notebook:GetSelection() end
 
+local function isCtrlFocused(e)
+  local ctrl = e and e:FindFocus()
+  return ctrl and
+    (ctrl:GetId() == e:GetId()
+     or ide.osname == 'Macintosh' and
+       ctrl:GetParent():GetId() == e:GetId()) and ctrl or nil
+end
+function ide:GetEditor()
+  local notebook = self:GetEditorNotebook()
+  local win = notebook:GetCurrentPage()
   local editor
-  if (index >= 0) and (index < notebook:GetPageCount())
-  and notebook:GetPage(index):GetClassInfo():GetClassName()=="wxStyledTextCtrl" then
-    editor = notebook:GetPage(index):DynamicCast("wxStyledTextCtrl")
+  if win and win:GetClassInfo():GetClassName()=="wxStyledTextCtrl" then
+    editor = win:DynamicCast("wxStyledTextCtrl")
   end
+  -- return the editor if it has focus
+  if isCtrlFocused(editor) then return editor end
+
+  -- check the rest of the documents (those not in the EditorNotebook)
+  for _, doc in pairs(ide:GetDocuments()) do
+    local _, nb = doc:GetTabIndex()
+    if nb ~= notebook and isCtrlFocused(doc:GetEditor()) then return doc:GetEditor() end
+  end
+  -- return the current editor in the notebook, even if it's not focused
   return editor
 end
 function ide:GetEditorWithFocus(...)
-  local function isCtrlFocused(e)
-    local ctrl = e and e:FindFocus()
-    return ctrl and
-      (ctrl:GetId() == e:GetId()
-       or ide.osname == 'Macintosh' and
-         ctrl:GetParent():GetId() == e:GetId()) and ctrl or nil
-  end
   -- need to distinguish GetEditorWithFocus() and GetEditorWithFocus(nil)
   -- as the latter may happen when GetEditor() is passed and returns `nil`
   if select('#', ...) > 0 then
@@ -181,7 +189,7 @@ function ide:GetEditorWithFocus(...)
   return nil
 end
 function ide:GetEditorWithLastFocus()
-  -- make sure ide.infocus is still a valid component and not "some" userdata
+  -- make sure ide.infocus is still a valid component
   return (self:IsValidCtrl(self.infocus)
     and self.infocus:GetClassInfo():GetClassName() == "wxStyledTextCtrl"
     and self.infocus:DynamicCast("wxStyledTextCtrl") or nil)
@@ -210,24 +218,35 @@ function ide:GetMainFrame()
   return self.frame
 end
 function ide:GetUIManager() return self.frame.uimgr end
-function ide:GetDocument(ed) return ed and self.openDocuments[ed:GetId()] end
+function ide:GetDocument(ed) return self:IsValidCtrl(ed) and self.openDocuments[ed:GetId()] end
 function ide:CreateDocument(ed, name)
-  if not ide:IsValidCtrl(ed) or self.openDocuments[ed:GetId()] then return false end
-  local document = setmetatable({editor = ed, fileName = name}, ide.proto.Document)
+  if not self:IsValidCtrl(ed) or self.openDocuments[ed:GetId()] then return false end
+  local document = setmetatable({editor = ed}, self.proto.Document)
+  document:SetFileName(name)
   self.openDocuments[ed:GetId()] = document
   return document
 end
 function ide:RemoveDocument(ed)
-  if not ide:IsValidCtrl(ed) or not self.openDocuments[ed:GetId()] then return false end
+  if not self:IsValidCtrl(ed) or not self.openDocuments[ed:GetId()] then return false end
+
+  local index, notebook = self:GetDocument(ed):GetTabIndex()
+  if not notebook:RemovePage(index) then return false end
+
+  -- if the notebook is in a floating pane and has no pages close the pane
+  if notebook ~= ide:GetEditorNotebook() and notebook:GetPageCount() == 0 then
+    local mgr = self:GetUIManager()
+    local pane = mgr:GetPane(notebook)
+    if pane:IsOk() then mgr:DetachPane(notebook) end
+  end
+
   self.openDocuments[ed:GetId()] = nil
-  ed:Destroy()
   return true
 end
 function ide:GetDocuments() return self.openDocuments end
 function ide:GetDocumentList()
   local a = {}
   for _, doc in pairs(self.openDocuments) do table.insert(a, doc) end
-  table.sort(a, function(a, b) return a.index < b.index end)
+  table.sort(a, function(a, b) return a:GetTabIndex() < b:GetTabIndex() end)
   return a
 end
 function ide:GetKnownExtensions(ext)
@@ -324,12 +343,16 @@ function ide:MakeMenu(t)
   return menu
 end
 
+function ide:SetTitle(title)
+  if not self:IsValidCtrl(self.frame) then return end
+  self.frame:SetTitle(title or self:ExpandPlaceholders(self.config.format.apptitle))
+end
+
 function ide:FindDocument(path)
   local fileName = wx.wxFileName(path)
   for _, doc in pairs(self:GetDocuments()) do
-    if doc.filePath and fileName:SameAs(wx.wxFileName(doc.filePath)) then
-      return doc
-    end
+    local path = doc:GetFilePath()
+    if path and fileName:SameAs(wx.wxFileName(path)) then return doc end
   end
   return
 end
@@ -342,9 +365,8 @@ function ide:FindDocumentsByPartialPath(path)
 
   local docs = {}
   for _, doc in pairs(self:GetDocuments()) do
-    if doc.filePath
-    and (doc.filePath:find(pattern)
-         or iscaseinsensitive and doc.filePath:lower():find(lpattern)) then
+    local path = doc:GetFilePath()
+    if path and (path:find(pattern) or iscaseinsensitive and path:lower():find(lpattern)) then
       table.insert(docs, doc)
     end
   end
@@ -422,7 +444,21 @@ function ide:ShowCommandBar(...) return ShowCommandBar(...) end
 
 function ide:RequestAttention()
   local ide = self
-  local frame = ide.frame
+  -- first check if the active editor has focus (it may be in a floating panel)
+  local ed = ide:GetEditor()
+  local frame = ide:GetMainFrame()
+  if ed and isCtrlFocused(ed) then
+    local frameci = frame:GetClassInfo()
+    local parent = ed:GetParent()
+    while parent do
+      if parent:GetClassInfo():IsKindOf(frameci) and parent:DynamicCast("wxFrame"):IsActive() then
+        parent:Raise()
+        return true
+      end
+      parent = parent:GetParent()
+    end
+  end
+  -- then check if the main frame should have the focus
   if not frame:IsActive() then
     frame:RequestUserAttention()
     if ide.osname == "Macintosh" then
@@ -535,6 +571,16 @@ function ide:CreateStyledTextCtrl(...)
   function editor:GotoPosEnforcePolicy(pos)
     self:GotoPos(pos)
     self:EnsureVisibleEnforcePolicy(self:LineFromPosition(pos))
+  end
+
+  function editor:MarginFromPoint(x)
+    if x < 0 then return nil end
+    local pos = 0
+    for m = 0, ide.MAXMARGIN do
+      pos = pos + self:GetMarginWidth(m)
+      if x < pos then return m end
+    end
+    return nil -- position outside of margins
   end
 
   function editor:CanFold()
@@ -719,6 +765,20 @@ function ide:CreateStyledTextCtrl(...)
   return editor
 end
 
+function ide:CreateNotebook(...)
+  local ctrl = wxaui.wxAuiNotebook(...)
+  if not ctrl then return end
+
+  if not self:IsValidProperty(ctrl, "GetCurrentPage") then
+    -- versions of wxlua prior to 3.1 may not have GetCurrentPage
+    function ctrl:GetCurrentPage()
+      local index = self:GetSelection()
+      return index >= 0 and self:GetPage(index) or nil
+    end
+  end
+  return ctrl
+end
+
 function ide:CreateTreeCtrl(...)
   local ctrl = wx.wxTreeCtrl(...)
   if not ctrl then return end
@@ -818,6 +878,7 @@ function ide:CreateImageList(group, ...)
   local _ = wx.wxLogNull() -- disable error reporting in popup
   local size = wx.wxSize(16,16)
   local imglist = wx.wxImageList(16,16)
+
   for i = 1, select('#', ...) do
     local icon, file = self:GetBitmap(select(i, ...), group, size)
     if imglist:Add(icon) == -1 then
@@ -909,6 +970,46 @@ function ide:GetBitmap(id, client, size)
   local icon = icons[file] or iconFilter(wx.wxBitmap(file), self.config.imagetint)
   icons[file] = icon
   return icon, file
+end
+
+local function str2rgb(str)
+  local a = ('a'):byte()
+  -- `red`/`blue` are more prominent colors; use them for the first two letters; suppress `green`
+  local r = (((str:sub(1,1):lower():byte() or a)-a) % 27)/27
+  local b = (((str:sub(2,2):lower():byte() or a)-a) % 27)/27
+  local g = (((str:sub(3,3):lower():byte() or a)-a) % 27)/27/3
+  local ratio = 256/(r + g + b + 1e-6)
+  return {math.floor(r*ratio), math.floor(g*ratio), math.floor(b*ratio)}
+end
+local clearbmps = {}
+function ide:CreateFileIcon(ext)
+  local iconmap = ide.config.filetree.iconmap
+  local color = type(iconmap)=="table" and type(iconmap[ext])=="table" and iconmap[ext].fg
+  local size = 16
+  local bitmap = wx.wxBitmap(size, size)
+  if not clearbmps[size] then
+    clearbmps[size] = ide:GetBitmap("FILE-NORMAL-CLR", "PROJECT", wx.wxSize(size,size))
+  end
+  local clearbmp = clearbmps[size]
+  local font = wx.wxFont(ide.font.editor)
+  font:SetPointSize(ide.osname == "Macintosh" and 6 or 5)
+  local mdc = wx.wxMemoryDC()
+  mdc:SelectObject(bitmap)
+  mdc:SetFont(font)
+  mdc:SetBackground(wx.wxTRANSPARENT_BRUSH)
+  mdc:Clear()
+  mdc:DrawBitmap(clearbmp, 0, 0, true)
+  mdc:SetTextForeground(wx.wxColour(0, 0, 32)) -- used fixed neutral color for text
+  mdc:DrawText(ext:sub(1,3), 2, 6) -- take first three letters only
+  if #ext > 0 then
+    local clr = wx.wxColour(unpack(type(color)=="table" and color or str2rgb(ext)))
+    mdc:SetPen(wx.wxPen(clr, 1, wx.wxSOLID))
+    mdc:SetBrush(wx.wxBrush(clr, wx.wxSOLID))
+    mdc:DrawRectangle(1, 2, 14, 3)
+  end
+  mdc:SelectObject(wx.wxNullBitmap)
+  bitmap:SetMask(wx.wxMask(bitmap, wx.wxBLACK)) -- set transparent background
+  return bitmap
 end
 
 function ide:AddPackage(name, package)
@@ -1112,8 +1213,9 @@ end
 
 local panels = {}
 function ide:AddPanel(ctrl, panel, name, conf)
+  if not self:IsValidCtrl(ctrl) then return end
   local width, height = 360, 200
-  local notebook = wxaui.wxAuiNotebook(self.frame, wx.wxID_ANY,
+  local notebook = ide:CreateNotebook(self.frame, wx.wxID_ANY,
     wx.wxDefaultPosition, wx.wxDefaultSize,
     wxaui.wxAUI_NB_DEFAULT_STYLE + wxaui.wxAUI_NB_TAB_EXTERNAL_MOVE
     - wxaui.wxAUI_NB_CLOSE_ON_ACTIVE_TAB + wx.wxNO_BORDER)
@@ -1435,7 +1537,8 @@ function ide:ExpandPlaceholders(msg, ph)
   local proj = self:GetProject() or ""
   local dirs = wx.wxFileName(proj):GetDirs()
   local doc = editor and self:GetDocument(editor)
-  local nb = self:GetEditorNotebook()
+  local index, nb
+  if doc then index, nb = doc:GetTabIndex() end
   local def = {
     f = proj,
     s = dirs[#dirs] or "",
@@ -1446,7 +1549,7 @@ function ide:ExpandPlaceholders(msg, ph)
     c = editor and editor:GetLineDyn(editor:GetCurrentLine()) or "",
     T = self:GetProperty("editor") or "",
     v = self.VERSION,
-    t = editor and nb:GetPageText(nb:GetPageIndex(editor)) or "",
+    t = index and nb:GetPageText(index) or "",
   }
   return(msg:gsub('%%(%w)', function(p) return ph[p] or def[p] or '?' end))
 end
@@ -1467,6 +1570,28 @@ do
   end
 end
 
+function ide:GetShortFilePath(filepath)
+  -- if running on Windows and can't open the file, this may mean that
+  -- the file path includes unicode characters that need special handling
+  -- when passing to applications not set up to handle them
+  if ide.osname == 'Windows' and pcall(require, "winapi") then
+    local fh = io.open(filepath, "r")
+    if fh then fh:close() end
+    if not fh and wx.wxFileExists(filepath) then
+      winapi.set_encoding(winapi.CP_UTF8)
+      local shortpath = winapi.short_path(filepath)
+      if shortpath ~= filepath then return shortpath end
+      ide:Print(
+        ("Can't get short path for a Unicode file name '%s' to use the file.")
+        :format(filepath))
+      ide:Print(
+        ("You can enable short names by using `fsutil 8dot3name set %s: 0` and recreate the file or directory.")
+        :format(wx.wxFileName(filepath):GetVolume()))
+    end
+  end
+  return filepath
+end
+
 do
   local beforeFullScreenPerspective
   local statusbarShown
@@ -1483,7 +1608,8 @@ do
         if name ~= "notebook" then uimgr:GetPane(name):Hide() end
       end
       uimgr:Update()
-      SetEditorSelection() -- make sure the focus is on the editor
+      local ed = ide:GetEditor()
+      if ed then ide:GetDocument(ed):SetActive() end
     end
 
     -- On OSX, status bar is not hidden when switched to

@@ -25,32 +25,6 @@ local image = { -- the order of ids has to match the order in the ImageList
   FILEKNOWN = 4,
 }
 
-local clearbmp = ide:GetBitmap("FILE-NORMAL-CLR", "PROJECT", wx.wxSize(16,16))
-local function str2rgb(str)
-  local a = ('a'):byte()
-  -- `red`/`blue` are more prominent colors; use them for the first two letters; suppress `green`
-  local r = (((str:sub(1,1):lower():byte() or a)-a) % 27)/27
-  local b = (((str:sub(2,2):lower():byte() or a)-a) % 27)/27
-  local g = (((str:sub(3,3):lower():byte() or a)-a) % 27)/27/3
-  local ratio = 256/(r + g + b + 1e-6)
-  return {math.floor(r*ratio), math.floor(g*ratio), math.floor(b*ratio)}
-end
-local function createImg(ext)
-  local iconmap = ide.config.filetree.iconmap
-  local color = type(iconmap)=="table" and type(iconmap[ext])=="table" and iconmap[ext].fg
-  local bitmap = wx.wxBitmap(16, 16)
-  local font = wx.wxFont(ide.font.editor)
-  font:SetPointSize(ide.osname == "Macintosh" and 6 or 5)
-  local mdc = wx.wxMemoryDC()
-  mdc:SelectObject(bitmap)
-  mdc:SetFont(font)
-  mdc:DrawBitmap(clearbmp, 0, 0, true)
-  mdc:SetTextForeground(wx.wxColour(unpack(type(color)=="table" and color or str2rgb(ext))))
-  mdc:DrawText(ext:sub(1,3), 2, 5) -- take first three letters only
-  mdc:SelectObject(wx.wxNullBitmap)
-  return bitmap
-end
-
 local function getIcon(name, isdir)
   local project = ide:GetProject()
   local startfile = GetFullPathIfExists(project, filetree.settings.startfile[project])
@@ -59,7 +33,7 @@ local function getIcon(name, isdir)
   local known = extmap[ext] or ide:FindSpec(ext)
   if known and not extmap[ext] then
     local iconmap = ide.config.filetree.iconmap
-    extmap[ext] = iconmap and ide.filetree.imglist:Add(createImg(ext)) or image.FILEKNOWN
+    extmap[ext] = iconmap and ide.filetree.imglist:Add(ide:CreateFileIcon(ext)) or image.FILEKNOWN
   end
   local icon = isdir and image.DIRECTORY or known and extmap[ext] or image.FILEOTHER
   if startfile and startfile == name then icon = image.FILEOTHERSTART end
@@ -79,7 +53,7 @@ local function treeAddDir(tree,parent_id,rootdir)
   local files = ide:GetFileList(rootdir)
   local dirmapped = {}
   local projpath = ide:GetProject()
-  local ishoisted = not ide:IsSameDirectoryPath(projpath, tree:GetItemFullName(parent_id))
+  local ishoisted = tree:IsDirHoisted(parent_id)
   -- if this is a root, but not hoisted folder
   if tree:IsRoot(parent_id) and not ishoisted then
     local mapped = filetree.settings.mapped[projpath] or {}
@@ -210,14 +184,20 @@ local function treeSetConnectorsAndIcons(tree)
 
   function tree:IsDirectory(item_id) return isIt(item_id, image.DIRECTORY) end
   function tree:IsDirMapped(item_id) return isIt(item_id, image.DIRECTORYMAPPED) end
+  function tree:IsDirHoisted(item_id)
+    return (self:IsRoot(item_id) and
+      not ide:IsSameDirectoryPath(ide:GetProject(), self:GetItemFullName(item_id)))
+  end
   -- "file known" is a special case as it includes file types registered dynamically
   function tree:IsFileKnown(item_id) return tree:GetItemImage(item_id) >= image.FILEKNOWN end
   function tree:IsFileOther(item_id) return isIt(item_id, image.FILEOTHER) end
   function tree:IsFileStart(item_id) return isIt(item_id, image.FILEOTHERSTART) end
   function tree:IsRoot(item_id) return not tree:GetItemParent(item_id):IsOk() end
 
+  function tree:GetFileImage(name) return getIcon(name, false) end
+
   local function saveSettings()
-    ide:AddPackage('core.filetree', {}):SetSettings(filetree.settings)
+    ide:GetPackage('core.filetree'):SetSettings(filetree.settings)
   end
 
   function tree:FindItem(match)
@@ -281,7 +261,9 @@ local function treeSetConnectorsAndIcons(tree)
         tree:Toggle(item_id)
       else refreshAncestors(tree:GetItemParent(item_id)) end -- stale content
     else -- open file
-      if wx.wxFileExists(name) then LoadFile(name,nil,true)
+      -- delay activation to keep the focus on the editor,
+      -- as doubleclick sends it back to the tree on Windows.
+      if wx.wxFileExists(name) then ide:DoWhenIdle(function() LoadFile(name,nil,true) end)
       else refreshAncestors(tree:GetItemParent(item_id)) end -- stale content
     end
   end
@@ -341,21 +323,19 @@ local function treeSetConnectorsAndIcons(tree)
     -- on case insensitive systems, but need to be allowed in renaming.
     if source == target then return end
 
-    if PackageEventHandle("onFiletreeFilePreRename", tree, itemsrc, source, target) == false then
-      return false
+    -- if target is a file, is already loaded and modified, then reject renaming
+    local targetdocs = isnew and {} or (isdir
+      and ide:FindDocumentsByPartialPath(target)
+      or {ide:FindDocument(target)})
+    for _, doc in ipairs(targetdocs) do
+      if doc and doc:IsModified() then
+        ide:ReportError(TR("Can't overwrite unsaved file '%s'."):format(doc:GetFilePath()))
+        return false
+      end
     end
 
-    local docs = {}
-    if not isnew then -- find if source is already opened in the editor
-      docs = (isdir
-        and ide:FindDocumentsByPartialPath(source)
-        or {ide:FindDocument(source)})
-      for _, doc in ipairs(docs) do
-        if not isdir and PackageEventHandle("onEditorPreSave", doc.editor, source) == false then
-          return false
-        end
-        if SaveModifiedDialog(doc.editor, true) == wx.wxID_CANCEL then return end
-      end
+    if PackageEventHandle("onFiletreeFilePreRename", tree, itemsrc, source, target) == false then
+      return false
     end
 
     -- check if existing file/dir is going to be overwritten
@@ -383,40 +363,47 @@ local function treeSetConnectorsAndIcons(tree)
       end
     end
 
+    local expanded = tree:IsExpanded(itemsrc)
+    local pos = tree:GetScrollPos(wx.wxVERTICAL)
+
+    tree:Freeze()
+
     refreshAncestors(tree:GetItemParent(itemsrc))
-    -- load file(s) into the same editor (if any); will also refresh the tree
-    if #docs > 0 then
-      for _, doc in ipairs(docs) do
-        local fullpath = doc.filePath
-        doc.filePath = nil -- remove path to avoid "file no longer exists" message
-        -- when moving folders, /foo/bar/file.lua can be replaced with
-        -- /foo/baz/bar/file.lua, so change /foo/bar to /foo/baz/bar
-        local path = (not iscaseinsensitive and fullpath:gsub(q(source), target)
-          or fullpath:lower():gsub(q(source:lower()), target))
-        local editor = LoadFile(path)
-        -- check if the file was loaded into another editor;
-        -- this is possible if "foo" is renamed to "bar" and both are opened;
-        -- if this happens, then "bar" is refreshed and "foo" can be closed.
-        if doc.editor:GetId() ~= editor:GetId() then ClosePage(doc.index) end
-        if not isdir and editor then PackageEventHandle("onEditorSave", editor) end
-      end
-    else -- refresh the tree and select the new item
-      local itemdst = tree:FindItem(target)
-      if itemdst then
-        tree:UnselectAll()
-        refreshAncestors(tree:GetItemParent(itemdst))
-        tree:SetFocusedItem(itemdst)
-        tree:SelectItem(itemdst)
-        tree:EnsureVisible(itemdst)
-        tree:SetScrollPos(wx.wxHORIZONTAL, 0, true)
-      end
+
+    -- if not new, check if source is already opened in the editor
+    local sourcedocs = isnew and {} or (isdir
+      and ide:FindDocumentsByPartialPath(source)
+      or {ide:FindDocument(source)})
+    local targetdoc = ide:FindDocument(target)
+
+    for _, doc in ipairs(sourcedocs) do
+      local fullpath = doc:GetFilePath()
+      -- when moving folders, /foo/bar/file.lua can be replaced with
+      -- /foo/baz/bar/file.lua, so change /foo/bar to /foo/baz/bar
+      local path = (not iscaseinsensitive and fullpath:gsub(q(source), target)
+        or fullpath:lower():gsub(q(source:lower()), target))
+
+      doc:SetFilePath(path)
+      doc:SetFileName(wx.wxFileName(path):GetFullName())
+      doc:SetFileModifiedTime(GetFileModTime(path))
+      doc:SetTabText(doc:GetFileName())
+      if doc:IsActive() then doc:SetActive() end
     end
 
-    -- refresh the target if it's open and has been overwritten
-    if overwrite and not isdir then
-      local doc = ide:FindDocument(target)
-      if doc then LoadFile(doc:GetFilePath(), doc:GetEditor()) end
+    -- close the target document, since the source has already been updated for it
+    if targetdoc and #sourcedocs > 0 then targetdoc:Close() end
+
+    local itemdst = tree:FindItem(target)
+    if itemdst then
+      tree:UnselectAll()
+      tree:RefreshChildren(tree:GetItemParent(itemdst))
+      tree:SetFocusedItem(itemdst)
+      tree:SelectItem(itemdst)
+      if expanded then tree:Expand(itemdst) end
+      tree:SetScrollPos(wx.wxVERTICAL, pos)
     end
+
+    tree:Thaw()
 
     PackageEventHandle("onFiletreeFileRename", tree, itemsrc, source, target)
 
@@ -449,7 +436,7 @@ local function treeSetConnectorsAndIcons(tree)
       end
     else
       local doc = ide:FindDocument(source)
-      if doc then ClosePage(doc.index) end
+      if doc then doc:Close() end
       if not wx.wxRemoveFile(source) then
         ide:ReportError(TR("Unable to delete file '%s': %s")
           :format(source, wx.wxSysErrorMsg()))
@@ -466,7 +453,7 @@ local function treeSetConnectorsAndIcons(tree)
     ide.filetree.filedrop.OnDropFiles = function(self, x, y, filenames)
       local item_id = tree:HitTest(wx.wxPoint(x,y))
       -- set project if one file moved over the project directory
-      if not tree:GetItemParent(item_id):IsOk() and #filenames == 1 then
+      if item_id:IsOk() and not tree:GetItemParent(item_id):IsOk() and #filenames == 1 then
         ide:SetProject(filenames[1])
       else
         for i = 1, #filenames do tree:MapDirectory(filenames[i]) end
@@ -518,15 +505,18 @@ local function treeSetConnectorsAndIcons(tree)
   -- handle context menu
   local function addItem(item_id, name, img)
     local isdir = tree:IsDirectory(item_id)
-    local parent = isdir and item_id or tree:GetItemParent(item_id)
-    if isdir then tree:Expand(item_id) end -- expand to populate if needed
+    local ismapped = tree:IsDirMapped(item_id)
+    local parent = (isdir or ismapped) and item_id or tree:GetItemParent(item_id)
+    if isdir or ismapped then tree:Expand(item_id) end -- expand to populate if needed
 
     local item = tree:PrependItem(parent, name, img)
     tree:SetItemHasChildren(parent, true)
     -- temporarily disable expand as we don't need this node populated
-    tree:SetEvtHandlerEnabled(false)
-    tree:EnsureVisible(item)
-    tree:SetEvtHandlerEnabled(true)
+    if not tree:IsVisible(item) then
+      tree:SetEvtHandlerEnabled(false)
+      tree:EnsureVisible(item)
+      tree:SetEvtHandlerEnabled(true)
+    end
     return item
   end
 
@@ -721,8 +711,7 @@ local function treeSetConnectorsAndIcons(tree)
       menu:Destroy(ismapped and ID.MAPDIRECTORY or ID.UNMAPDIRECTORY)
 
       local isroot = tree:IsRoot(item_id)
-      local ishoisted = not ide:IsSameDirectoryPath(
-        ide:GetProject(), tree:GetItemFullName(tree:GetRootItem()))
+      local ishoisted = tree:IsDirHoisted(tree:GetRootItem())
       menu:Enable(ID.UNHOISTDIRECTORY, ishoisted)
       menu:Enable(ID.HOISTDIRECTORY, isdir and not isroot or ismapped)
       if not ishoisted then menu:Destroy(ID.UNHOISTDIRECTORY) end
@@ -1000,12 +989,22 @@ function FileTreeMarkSelected(file)
       local curr_id = wx.wxIsAbsolutePath(curr_file) and projtree:FindItem(curr_file)
       if curr_id and projtree:IsBold(curr_id) then
         projtree:SetItemBold(curr_id, false)
+        PackageEventHandle("onFiletreeFileMarkSelected", projtree, curr_id, curr_file, false)
       end
     end
     if item_id then
-      projtree:EnsureVisible(item_id)
-      projtree:SetScrollPos(wx.wxHORIZONTAL, 0, true)
+      if not projtree:IsVisible(item_id) then
+        if ide.osname ~= "Unix" then projtree:Freeze() end
+        projtree:EnsureVisible(item_id)
+        -- it's supposed to be enough to do EnsureVisible,
+        -- but occasionally it's positioned one item too high (wxwidgets 3.1.1 on Win),
+        -- so scroll to make sure the item really is visible
+        projtree:ScrollTo(item_id)
+        projtree:SetScrollPos(wx.wxHORIZONTAL, 0, true)
+        if ide.osname ~= "Unix" then projtree:Thaw() end
+      end
       projtree:SetItemBold(item_id, true)
+      PackageEventHandle("onFiletreeFileMarkSelected", projtree, item_id, file, true)
     end
     curr_file = file
     if ide.wxver < "2.9.5" and ide.osname == 'Macintosh' then
@@ -1053,6 +1052,14 @@ local function unWatchDir(path)
   if watcher and watchers[path] then watcher:Remove(wx.wxFileName.DirName(path)) end
   watchers[path] = nil
 end
+
+local function syncTree(editor)
+    local doc = editor and ide:GetDocument(editor)
+    FileTreeMarkSelected(doc and doc:GetFilePath() or '')
+    SetAutoRecoveryMark()
+    ide:SetTitle()
+end
+
 local package = ide:AddPackage('core.filetree', {
     onProjectClose = function(plugin, project)
       if watcher then watcher:RemoveAll() end
@@ -1098,6 +1105,16 @@ local package = ide:AddPackage('core.filetree', {
       -- only unwatch if the directory is not empty;
       -- otherwise it's collapsed without ability to expand
       if tree:GetChildrenCount(item_id, false) > 0 then unWatchDir(tree:GetItemFullName(item_id)) end
+    end,
+
+    onEditorFocusSet = function(plugin, editor)
+      -- need to delay the sync, as the document may not yet exist for the editor
+      ide:DoWhenIdle(function() if ide:IsValidCtrl(editor) then syncTree(editor) end end)
+    end,
+
+    onEditorClose = function(plugin, editor)
+      -- check if the last document is being closed
+      if #ide:GetDocumentList() <= 1 then syncTree() end
     end,
   })
 MergeSettings(filetree.settings, package:GetSettings())

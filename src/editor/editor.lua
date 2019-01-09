@@ -5,12 +5,14 @@
 
 local editorID = 100 -- window id to create editor pages with, incremented for new editors
 
-local openDocuments = ide.openDocuments
 local notebook = ide.frame.notebook
 local edcfg = ide.config.editor
 local styles = ide.config.styles
 local unpack = table.unpack or unpack
 local q = EscapeMagic
+
+local CURRENT_LINE_MARKER = StylesGetMarker("currentline")
+local CURRENT_LINE_MARKER_VALUE = 2^CURRENT_LINE_MARKER
 
 local margin = { LINENUMBER = 0, MARKER = 1, FOLD = 2 }
 local linenumlen = 4 + 0.5
@@ -37,8 +39,11 @@ local foldtypes = {
 local statusTextTable = { "OVR?", "R/O?", "Cursor Pos" }
 
 local function updateStatusText(editor)
+  local frame = ide:GetMainFrame()
+  if not ide:IsValidCtrl(frame) then return end
+
   local texts = { "", "", "" }
-  if ide.frame and editor then
+  if frame and editor then
     local pos = editor:GetCurrentPos()
     local selected = #editor:GetSelectedText()
     local selections = ide.wxver >= "2.9.5" and editor:GetSelections() or 1
@@ -53,7 +58,7 @@ local function updateStatusText(editor)
       }, ' ')}
   end
 
-  if ide.frame then
+  if frame then
     for n in ipairs(texts) do
       if (texts[n] ~= statusTextTable[n]) then
         ide:SetStatus(texts[n], n)
@@ -104,22 +109,22 @@ end
 local function isFileAlteredOnDisk(editor)
   if not editor then return end
 
-  local id = editor:GetId()
-  if openDocuments[id] then
-    local filePath = openDocuments[id].filePath
-    local fileName = openDocuments[id].fileName
-    local oldModTime = openDocuments[id].modTime
+  local doc = ide:GetDocument(editor)
+  if doc then
+    local filePath = doc:GetFilePath()
+    local fileName = doc:GetFileName()
+    local oldModTime = doc:GetFileModifiedTime()
 
     if filePath and (string.len(filePath) > 0) and oldModTime and oldModTime:IsValid() then
       local modTime = GetFileModTime(filePath)
       if modTime == nil then
-        openDocuments[id].modTime = nil
+        doc:SetFileModifiedTime(nil)
         wx.wxMessageBox(
           TR("File '%s' no longer exists."):format(fileName),
           ide:GetProperty("editormessage"),
           wx.wxOK + wx.wxCENTRE, ide.frame)
       elseif not editor:GetReadOnly() and modTime:IsValid() and oldModTime:IsEarlierThan(modTime) then
-        local ret = (edcfg.autoreload and (not ide:GetDocument(editor):IsModified()) and wx.wxYES)
+        local ret = edcfg.autoreload and (not doc:IsModified()) and wx.wxYES
           or wx.wxMessageBox(
             TR("File '%s' has been modified on disk."):format(fileName)
             .."\n"..TR("Do you want to reload it?"),
@@ -127,7 +132,7 @@ local function isFileAlteredOnDisk(editor)
             wx.wxYES_NO + wx.wxCENTRE, ide.frame)
 
         if ret ~= wx.wxYES or ReLoadFile(filePath, editor, true) then
-          openDocuments[id].modTime = GetFileModTime(filePath)
+          doc:SetFileModifiedTime(GetFileModTime(filePath))
         end
       end
     end
@@ -147,30 +152,6 @@ local function navigateBack(editor)
   local pos = table.remove(editor.jumpstack)
   editor:GotoPosEnforcePolicy(pos)
   return true
-end
-
--- init new notebook page selection, use nil for current page
-function SetEditorSelection(selection)
-  local editor = ide:GetEditor(selection)
-  updateStatusText(editor) -- update even if nil
-  ide.frame:SetTitle(ide:ExpandPlaceholders(ide.config.format.apptitle))
-
-  if editor then
-    editor:SetFocus()
-    editor:SetSTCFocus(true)
-    -- when the active editor is changed while the focus is away from the application
-    -- (as happens on OSX when the editor is selected from the command bar)
-    -- the focus stays on wxAuiToolBar component, so need to explicitly switch it.
-    if ide.osname == "Macintosh" and ide.infocus then ide.infocus = editor end
-
-    local id = editor:GetId()
-    FileTreeMarkSelected(openDocuments[id] and openDocuments[id].filePath or '')
-    AddToFileHistory(openDocuments[id] and openDocuments[id].filePath)
-  else
-    FileTreeMarkSelected('')
-  end
-
-  SetAutoRecoveryMark()
 end
 
 function EditorAutoComplete(editor)
@@ -382,6 +363,52 @@ function EditorCallTip(editor, pos, x, y)
     end
     if oncalltip ~= false then callTipFitAndShow(editor, pos, tip) end
   end
+end
+
+function ClosePage(selection, notebook)
+  local editor = (notebook and selection
+    and notebook:GetPage(selection):DynamicCast("wxStyledTextCtrl")
+    or ide:GetEditor()
+  )
+  if not editor then return false end
+
+  if PackageEventHandle("onEditorPreClose", editor) == false then
+    return false
+  end
+
+  if SaveModifiedDialog(editor, true) ~= wx.wxID_CANCEL then
+    DynamicWordsRemoveAll(editor)
+    local debugger = ide:GetDebugger()
+    -- check if the window with the scratchpad running is being closed
+    if debugger and debugger.scratchpad and debugger.scratchpad.editors
+    and debugger.scratchpad.editors[editor] then
+      debugger:ScratchpadOff()
+    end
+    -- check if the debugger is running and is using the current window;
+    -- abort the debugger if the current marker is in the window being closed
+    if debugger and debugger:IsConnected() and
+      (editor:MarkerNext(0, CURRENT_LINE_MARKER_VALUE) >= 0) then
+      debugger:Stop()
+    end
+
+    -- update the editor status if the active document is being closed
+    -- if another editor/document gets focus, it will update the status
+    if ide:GetDocument(editor):IsActive() then updateStatusText() end
+
+    -- the event needs to be triggered before the document/editor is removed,
+    -- so there is a small chance that the notebook page will not be removed,
+    -- despite the event already triggered
+    PackageEventHandle("onEditorClose", editor)
+    if not ide:RemoveDocument(editor) then return false end
+    editor:Destroy()
+
+    ide:SetTitle()
+
+    -- disable full screen if the last tab in the main notebook is closed
+    if ide:GetEditorNotebook():GetPageCount() == 0 then ide:ShowFullScreen(false) end
+    return true
+  end
+  return false
 end
 
 -- Indicator handling for functions and local/global variables
@@ -729,7 +756,6 @@ function CreateEditor(bare)
 
   editor:SetMarginType(margin.LINENUMBER, wxstc.wxSTC_MARGIN_NUMBER)
   editor:SetMarginMask(margin.LINENUMBER, 0)
-  editor:SetMarginSensitive(margin.LINENUMBER, true)
   editor:SetMarginWidth(margin.LINENUMBER,
     edcfg.linenumber and math.floor(linenumlen * editor:TextWidth(wxstc.wxSTC_STYLE_DEFAULT, "8")) or 0)
 
@@ -875,6 +901,38 @@ function CreateEditor(bare)
 
   if bare then return editor end -- bare editor doesn't have any event handlers
 
+  local mclickpos
+  editor:Connect(wx.wxEVT_LEFT_DOWN, function(event)
+      event:Skip()
+      mclickpos = event:GetPosition()
+    end)
+  editor:Connect(wx.wxEVT_LEFT_UP, function(event)
+      event:Skip()
+      if not mclickpos
+      or wx.wxGetKeyState(wx.WXK_SHIFT)
+      or wx.wxGetKeyState(wx.WXK_CONTROL)
+      or wx.wxGetKeyState(wx.WXK_ALT) then return end
+
+      local point = event:GetPosition()
+      if mclickpos:GetX() ~= point:GetX() or mclickpos:GetY() ~= point:GetY() then return end
+
+      local pos = editor:PositionFromPoint(point)
+      local line = editor:LineFromPosition(pos)
+      local header = bit.band(editor:GetFoldLevel(line),
+        wxstc.wxSTC_FOLDLEVELHEADERFLAG) == wxstc.wxSTC_FOLDLEVELHEADERFLAG
+      local from = header and line or editor:GetFoldParent(line)
+
+      -- check if the click over the LINENUMBER margin
+      if editor:MarginFromPoint(point:GetX()) == margin.LINENUMBER then
+        -- if the next line is not visible, select the entire block to include folder lines
+        if not editor:GetLineVisible(line+1) then
+          local to = editor:GetLastChild(from, -1)
+          editor:SetSelection(editor:PositionFromLine(from), editor:PositionFromLine(to+1))
+          editor:ToggleFold(line)
+        end
+      end
+    end)
+
   editor.ev = {}
   editor:Connect(wxstc.wxEVT_STC_MARGINCLICK,
     function (event)
@@ -885,15 +943,6 @@ function CreateEditor(bare)
       local marginno = event:GetMargin()
       if marginno == margin.MARKER then
         editor:BreakpointToggle(line)
-      elseif marginno == margin.LINENUMBER then
-        -- if the next line is visible, select only one line
-        if editor:GetLineVisible(line+1) then
-          editor:SetSelection(editor:PositionFromLine(line), editor:PositionFromLine(line+1))
-        else -- select the entire block to include folder lines
-          local to = editor:GetLastChild(from, -1)
-          editor:SetSelection(editor:PositionFromLine(from), editor:PositionFromLine(to+1))
-          editor:ToggleFold(line)
-        end
       elseif marginno == margin.FOLD then
         local shift, ctrl = wx.wxGetKeyState(wx.WXK_SHIFT), wx.wxGetKeyState(wx.WXK_CONTROL)
         if shift and ctrl then
@@ -1102,6 +1151,7 @@ function CreateEditor(bare)
       -- which causes canceling of auto-complete, which later cause crash because
       -- the window is destroyed in wxwidgets after already being closed. Skip on OSX.
       if ide.osname ~= 'Macintosh' and editor:AutoCompActive() then editor:AutoCompCancel() end
+
       PackageEventHandle("onEditorFocusLost", editor)
       event:Skip()
     end)
@@ -1188,7 +1238,6 @@ function CreateEditor(bare)
   -- brackets or backspace is used (very slow screen repaint with 0.5s delay).
   -- Moving it to PAINTED event creates problems on OSX (using wx2.9.5+),
   -- where refresh of R/W and R/O status in the status bar is delayed.
-
   editor:Connect(wxstc.wxEVT_STC_PAINTED,
     function (event)
       PackageEventHandle("onEditorPainted", editor, event)
@@ -1425,9 +1474,9 @@ function CreateEditor(bare)
       -- if Shift+Zoom is used, then zoom all editors, not just the current one
       if wx.wxGetKeyState(wx.WXK_SHIFT) then
         local zoom = editor:GetZoom()
-        for _, doc in pairs(openDocuments) do
+        for _, doc in pairs(ide:GetDocuments()) do
           -- check the editor zoom level to avoid recursion
-          if doc.editor:GetZoom() ~= zoom then doc.editor:SetZoom(zoom) end
+          if doc:GetEditor():GetZoom() ~= zoom then doc:GetEditor():SetZoom(zoom) end
         end
       end
       event:Skip()
@@ -1623,7 +1672,7 @@ function AddEditor(editor, name)
     ide:RemoveDocument(editor)
     return
   else
-    document.index = notebook:GetPageIndex(editor)
+    document:SetTabText(name)
     return document
   end
 end
